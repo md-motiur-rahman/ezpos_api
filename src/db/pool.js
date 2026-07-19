@@ -1,5 +1,6 @@
 import pg from 'pg';
 import config from '../config/index.js';
+import { logger } from '../utils/logger.js';
 
 const { Pool } = pg;
 
@@ -14,9 +15,7 @@ export const pool = new Pool({
 });
 
 pool.on('error', (err) => {
-  // Fired on idle client errors (e.g. connection dropped by the DB host).
-  // Logged, not thrown - a single dead idle connection shouldn't crash the process.
-  console.error('Unexpected error on idle database client', err);
+  logger.error({ err }, 'Unexpected error on idle database client');
 });
 
 /**

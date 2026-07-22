@@ -1,0 +1,39 @@
+# Render Blueprint - Infrastructure as Code.
+# Push this to GitHub, then in the Render Dashboard: New > Blueprint > select this repo.
+# Render will provision everything below automatically.
+
+databases:
+  - name: pos-postgres
+    databaseName: pos_production
+    plan: basic-256mb # current Render Postgres tier naming; includes backups + point-in-time recovery
+    postgresMajorVersion: '16' # matches the Postgres version used in local dev/test (see docker setup)
+    region: frankfurt # EU region, chosen for GDPR-friendly hosting (see Module 0 planning)
+
+services:
+  - type: web
+    name: pos-api
+    runtime: node
+    plan: starter
+    region: frankfurt
+    branch: main
+    autoDeployTrigger: commit
+    buildCommand: npm ci
+    preDeployCommand: npm run migrate:up # runs migrations after build, before the new version starts serving traffic
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pos-postgres
+          property: connectionString
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false # set manually in the Render dashboard once the dashboard's real domain is known
+      # PORT is not set here - Render injects it automatically for web services,
+      # and our app already reads it via process.env.PORT (see src/config/env.js).
+      #
+      # Future modules will add their own required vars here as they're built:
+      #   JWT_ACCESS_SECRET / JWT_REFRESH_SECRET  <- Module 1
+      #   STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET <- Module 3
+      #   EMAIL_PROVIDER_API_KEY                   <- Module 1

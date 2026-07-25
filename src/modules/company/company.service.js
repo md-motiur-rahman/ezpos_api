@@ -1,5 +1,6 @@
 import { AppError } from '../../utils/AppError.js';
 import * as companyRepository from './company.repository.js';
+import * as shopService from '../shop/shop.service.js';
 
 const POSTGRES_UNIQUE_VIOLATION = '23505';
 
@@ -60,9 +61,17 @@ export async function deleteMyCompany(ownerUserId) {
 
 export async function setBusinessType(ownerUserId, { businessType }) {
   const company = await getActiveCompanyOrThrow(ownerUserId);
-  // NOTE: no restriction on switching chain -> single yet, even if the
-  // company already has multiple shops - that check needs the shops table,
-  // which doesn't exist until Module 2.3. Guard to be added there.
+
+  if (businessType === 'single') {
+    const shopCount = await shopService.countActiveShops(company.id);
+    if (shopCount > 1) {
+      throw new AppError(
+        'Cannot switch to single-shop while more than one active shop exists. Close shops down to one first.',
+        409
+      );
+    }
+  }
+
   const updated = await companyRepository.setBusinessType(company.id, businessType);
   return toResponse(updated);
 }

@@ -2,11 +2,16 @@ import { Router } from 'express';
 import { requireAuth } from '../../middleware/requireAuth.js';
 import { validateBody, validateParams } from '../../middleware/validate.js';
 import * as shopController from './shop.controller.js';
+import shopAddonRoutes from './shopAddon.routes.js';
 import { createShopSchema, updateShopSchema, shopIdParamSchema } from './shop.validation.js';
 
 const router = Router();
 
 router.use(requireAuth);
+
+// Nested add-on routes (Module 3.3). Mounted before the /:id routes so the
+// more specific path wins - Express matches in definition order.
+router.use('/:shopId/addons', shopAddonRoutes);
 
 router.post('/', validateBody(createShopSchema), shopController.createShop);
 router.get('/', shopController.listMyShops);

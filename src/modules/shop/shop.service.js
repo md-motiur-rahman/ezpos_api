@@ -2,12 +2,14 @@ import { AppError } from '../../utils/AppError.js';
 import { logger } from '../../utils/logger.js';
 import {
   createSubscriptionWithShop,
-  addShopSubscriptionItem,
-  removeShopSubscriptionItem,
+  addSubscriptionItem,
+  removeSubscriptionItem,
   cancelSubscriptionAtPeriodEnd,
 } from '../../utils/stripe.js';
+import config from '../../config/index.js';
 import * as companyRepository from '../company/company.repository.js';
 import * as shopRepository from './shop.repository.js';
+import * as shopAddonRepository from './shopAddon.repository.js';
 
 function toResponse(shop) {
   return {
@@ -59,9 +61,10 @@ export async function createShop(ownerUserId, data) {
   // If Stripe fails we roll the shop back, so a shop never exists unbilled.
   try {
     if (company.stripe_subscription_id) {
-      const itemId = await addShopSubscriptionItem({
+      const itemId = await addSubscriptionItem({
         subscriptionId: company.stripe_subscription_id,
-        shopId: shop.id,
+        priceId: config.env.stripeShopPriceId,
+        metadata: { shopId: shop.id },
       });
       await shopRepository.setStripeSubscriptionItemId(shop.id, itemId);
     } else {
@@ -88,7 +91,8 @@ export async function listMyShops(ownerUserId) {
   return shops.map(toResponse);
 }
 
-async function getMyShopOrThrow(ownerUserId, shopId) {
+/** Exported so shopAddon.service.js can reuse the same ownership resolution. */
+export async function getMyShopOrThrow(ownerUserId, shopId) {
   const company = await getMyActiveCompanyOrThrow(ownerUserId);
   const shop = await shopRepository.findActiveShopByIdForCompany(shopId, company.id);
   if (!shop) {
@@ -124,15 +128,28 @@ export async function deleteMyShop(ownerUserId, shopId) {
   if (activeCount <= 1 && company.stripe_subscription_id) {
     // Last shop. Deleting the final item on a subscription is ambiguous in
     // Stripe, so cancel the whole subscription at period end instead - the
-    // company keeps access for the cycle they've already paid for.
+    // company keeps access for the cycle they've already paid for. Any
+    // add-on line items are cancelled along with the subscription.
     await cancelSubscriptionAtPeriodEnd({ subscriptionId: company.stripe_subscription_id });
     // Cleared so that adding a shop later starts a fresh subscription
     // rather than trying to reuse a cancelled one.
     await companyRepository.setStripeSubscriptionId(company.id, null);
-  } else if (shop.stripe_subscription_item_id) {
-    await removeShopSubscriptionItem({ subscriptionItemId: shop.stripe_subscription_item_id });
+  } else {
+    // Not the last shop, so the subscription lives on - this shop's add-on
+    // items must be removed individually, or the company would keep paying
+    // for add-ons on a closed shop.
+    const addons = await shopAddonRepository.listActiveAddonsForShop(shop.id);
+    for (const addon of addons) {
+      if (addon.stripe_subscription_item_id) {
+        await removeSubscriptionItem({ subscriptionItemId: addon.stripe_subscription_item_id });
+      }
+    }
+    if (shop.stripe_subscription_item_id) {
+      await removeSubscriptionItem({ subscriptionItemId: shop.stripe_subscription_item_id });
+    }
   }
 
+  await shopAddonRepository.softDeleteAllAddonsForShop(shop.id);
   await shopRepository.softDeleteShop(shop.id);
 }
 

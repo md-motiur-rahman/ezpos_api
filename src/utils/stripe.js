@@ -69,8 +69,12 @@ export async function createSubscriptionWithShop({ customerId, shopId }) {
   }
 }
 
-/** Adds another shop as a line item on the company's existing subscription. */
-export async function addShopSubscriptionItem({ subscriptionId, shopId }) {
+/**
+ * Adds a line item to an existing subscription. Generic over what's being
+ * billed - a shop (3.2) or a per-shop add-on (3.3) - the only difference is
+ * which Price is used.
+ */
+export async function addSubscriptionItem({ subscriptionId, priceId, metadata }) {
   if (config.env.isTest) {
     return fakeId('si');
   }
@@ -78,22 +82,23 @@ export async function addShopSubscriptionItem({ subscriptionId, shopId }) {
   try {
     const item = await stripe.subscriptionItems.create({
       subscription: subscriptionId,
-      price: config.env.stripeShopPriceId,
-      metadata: { shopId },
+      price: priceId,
+      metadata,
     });
     return item.id;
   } catch (err) {
-    logger.error({ err, subscriptionId, shopId }, 'Failed to add shop subscription item');
-    throw new AppError('Failed to set up billing for this shop', 502);
+    logger.error({ err, subscriptionId, priceId, metadata }, 'Failed to add subscription item');
+    throw new AppError('Failed to update billing', 502);
   }
 }
 
 /**
- * Removes one shop's line item. proration_behavior 'none' means no credit
- * is issued for the remainder of the current period - matching the agreed
- * policy: no mid-cycle refunds, access continues until the cycle ends.
+ * Removes one line item (a shop or an add-on). proration_behavior 'none'
+ * means no credit is issued for the remainder of the current period -
+ * matching the agreed policy: no mid-cycle refunds, access continues until
+ * the cycle ends.
  */
-export async function removeShopSubscriptionItem({ subscriptionItemId }) {
+export async function removeSubscriptionItem({ subscriptionItemId }) {
   if (config.env.isTest) {
     return;
   }
@@ -101,8 +106,8 @@ export async function removeShopSubscriptionItem({ subscriptionItemId }) {
   try {
     await stripe.subscriptionItems.del(subscriptionItemId, { proration_behavior: 'none' });
   } catch (err) {
-    logger.error({ err, subscriptionItemId }, 'Failed to remove shop subscription item');
-    throw new AppError('Failed to update billing for this shop', 502);
+    logger.error({ err, subscriptionItemId }, 'Failed to remove subscription item');
+    throw new AppError('Failed to update billing', 502);
   }
 }
 

@@ -354,3 +354,87 @@ test('PATCH /api/shops/:id updates vatRegistered and defaultVatRate together', a
   assert.equal(res.body.vatRegistered, true);
   assert.equal(res.body.defaultVatRate, 20);
 });
+
+// --- Per-shop subscription line items (Module 3.2) ---
+
+/** Reads the billing ids straight from the DB - they're internal, not in API responses. */
+async function billingState(userId) {
+  const { rows } = await query(
+    `SELECT c.id AS company_id, c.stripe_subscription_id,
+            s.id AS shop_id, s.stripe_subscription_item_id, s.deleted_at
+     FROM companies c
+     LEFT JOIN shops s ON s.company_id = c.id
+     WHERE c.owner_user_id = $1 AND c.deleted_at IS NULL
+     ORDER BY s.created_at`,
+    [userId]
+  );
+  return rows;
+}
+
+test('creating the first shop creates a subscription and a line item', async () => {
+  const { userId, header } = await setupOwnerWithCompany('chain');
+
+  await request(app).post('/api/shops').set('Authorization', header).send(VALID_SHOP);
+
+  const rows = await billingState(userId);
+  assert.ok(rows[0].stripe_subscription_id.startsWith('sub_test_'));
+  assert.ok(rows[0].stripe_subscription_item_id.startsWith('si_test_'));
+});
+
+test('creating a second shop reuses the subscription and adds a separate line item', async () => {
+  const { userId, header } = await setupOwnerWithCompany('chain');
+
+  await request(app).post('/api/shops').set('Authorization', header).send(VALID_SHOP);
+  await request(app)
+    .post('/api/shops')
+    .set('Authorization', header)
+    .send({ ...VALID_SHOP, name: 'Second Shop' });
+
+  const rows = await billingState(userId);
+  assert.equal(rows.length, 2);
+  // Same subscription for both...
+  assert.equal(rows[0].stripe_subscription_id, rows[1].stripe_subscription_id);
+  // ...but each shop has its own line item.
+  assert.notEqual(rows[0].stripe_subscription_item_id, rows[1].stripe_subscription_item_id);
+});
+
+test('deleting a non-last shop leaves the subscription in place', async () => {
+  const { userId, header } = await setupOwnerWithCompany('chain');
+  const first = await request(app).post('/api/shops').set('Authorization', header).send(VALID_SHOP);
+  await request(app)
+    .post('/api/shops')
+    .set('Authorization', header)
+    .send({ ...VALID_SHOP, name: 'Second Shop' });
+
+  await request(app).delete(`/api/shops/${first.body.id}`).set('Authorization', header);
+
+  const rows = await billingState(userId);
+  assert.ok(rows[0].stripe_subscription_id); // subscription survives
+});
+
+test('deleting the last shop cancels the subscription and clears the id', async () => {
+  const { userId, header } = await setupOwnerWithCompany('single');
+  const created = await request(app).post('/api/shops').set('Authorization', header).send(VALID_SHOP);
+
+  await request(app).delete(`/api/shops/${created.body.id}`).set('Authorization', header);
+
+  const rows = await billingState(userId);
+  assert.equal(rows[0].stripe_subscription_id, null);
+});
+
+test('adding a shop after the last one closed starts a fresh subscription', async () => {
+  const { userId, header } = await setupOwnerWithCompany('single');
+  const first = await request(app).post('/api/shops').set('Authorization', header).send(VALID_SHOP);
+  const firstSub = (await billingState(userId))[0].stripe_subscription_id;
+
+  await request(app).delete(`/api/shops/${first.body.id}`).set('Authorization', header);
+  await request(app)
+    .post('/api/shops')
+    .set('Authorization', header)
+    .send({ ...VALID_SHOP, name: 'Replacement Shop' });
+
+  const rows = await billingState(userId);
+  const active = rows.find((r) => r.deleted_at === null);
+  assert.ok(active.stripe_subscription_id);
+  assert.notEqual(active.stripe_subscription_id, firstSub);
+});

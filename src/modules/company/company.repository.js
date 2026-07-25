@@ -1,14 +1,13 @@
-import { query } from '../../db/pool.js';
-import { buildUpdateSet } from '../../utils/sql.js';
+import { query } from "../../db/pool.js";
+import { buildUpdateSet } from "../../utils/sql.js";
 
 const COLUMNS = `id, owner_user_id, name, address_line1, address_line2, city, postcode,
                  country, phone, vat_number, company_number, business_type,
-                 stripe_customer_id, created_at, updated_at`;
-
+                 stripe_customer_id, stripe_subscription_id, created_at, updated_at`;
 export async function findActiveCompanyByOwner(ownerUserId) {
   const { rows } = await query(
     `SELECT ${COLUMNS} FROM companies WHERE owner_user_id = $1 AND deleted_at IS NULL`,
-    [ownerUserId]
+    [ownerUserId],
   );
   return rows[0] ?? null;
 }
@@ -31,7 +30,7 @@ export async function createCompany(ownerUserId, data) {
       data.phone,
       data.vatNumber ?? null,
       data.companyNumber ?? null,
-    ]
+    ],
   );
   return rows[0];
 }
@@ -39,43 +38,51 @@ export async function createCompany(ownerUserId, data) {
 /** Builds an UPDATE with only the fields present in `data` (partial update). */
 export async function updateCompany(companyId, data) {
   const fieldMap = {
-    name: 'name',
-    addressLine1: 'address_line1',
-    addressLine2: 'address_line2',
-    city: 'city',
-    postcode: 'postcode',
-    country: 'country',
-    phone: 'phone',
-    vatNumber: 'vat_number',
-    companyNumber: 'company_number',
+    name: "name",
+    addressLine1: "address_line1",
+    addressLine2: "address_line2",
+    city: "city",
+    postcode: "postcode",
+    country: "country",
+    phone: "phone",
+    vatNumber: "vat_number",
+    companyNumber: "company_number",
   };
 
   const { clause, values } = buildUpdateSet(fieldMap, data);
   values.push(companyId);
   const { rows } = await query(
     `UPDATE companies SET ${clause} WHERE id = $${values.length} RETURNING ${COLUMNS}`,
-    values
+    values,
   );
   return rows[0];
 }
 
 export async function softDeleteCompany(companyId) {
-  await query(`UPDATE companies SET deleted_at = now(), updated_at = now() WHERE id = $1`, [
-    companyId,
-  ]);
+  await query(
+    `UPDATE companies SET deleted_at = now(), updated_at = now() WHERE id = $1`,
+    [companyId],
+  );
 }
 
 export async function setBusinessType(companyId, businessType) {
   const { rows } = await query(
     `UPDATE companies SET business_type = $1, updated_at = now() WHERE id = $2 RETURNING ${COLUMNS}`,
-    [businessType, companyId]
+    [businessType, companyId],
   );
   return rows[0];
 }
 
 export async function setStripeCustomerId(companyId, stripeCustomerId) {
-  await query(`UPDATE companies SET stripe_customer_id = $1, updated_at = now() WHERE id = $2`, [
-    stripeCustomerId,
-    companyId,
-  ]);
+  await query(
+    `UPDATE companies SET stripe_customer_id = $1, updated_at = now() WHERE id = $2`,
+    [stripeCustomerId, companyId],
+  );
+}
+/** Pass null to clear it (e.g. when the last shop closes and the subscription is cancelled). */
+export async function setStripeSubscriptionId(companyId, stripeSubscriptionId) {
+  await query(
+    `UPDATE companies SET stripe_subscription_id = $1, updated_at = now() WHERE id = $2`,
+    [stripeSubscriptionId, companyId],
+  );
 }

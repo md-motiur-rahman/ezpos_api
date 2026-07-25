@@ -1,4 +1,11 @@
 import { AppError } from '../../utils/AppError.js';
+import { logger } from '../../utils/logger.js';
+import {
+  createSubscriptionWithShop,
+  addShopSubscriptionItem,
+  removeShopSubscriptionItem,
+  cancelSubscriptionAtPeriodEnd,
+} from '../../utils/stripe.js';
 import * as companyRepository from '../company/company.repository.js';
 import * as shopRepository from './shop.repository.js';
 
@@ -46,7 +53,33 @@ export async function createShop(ownerUserId, data) {
   }
 
   const shop = await shopRepository.createShop(company.id, data);
-  return toResponse(shop);
+
+  // Billing: first shop creates the company's subscription (Stripe can't
+  // create one with zero items); later shops are added as line items to it.
+  // If Stripe fails we roll the shop back, so a shop never exists unbilled.
+  try {
+    if (company.stripe_subscription_id) {
+      const itemId = await addShopSubscriptionItem({
+        subscriptionId: company.stripe_subscription_id,
+        shopId: shop.id,
+      });
+      await shopRepository.setStripeSubscriptionItemId(shop.id, itemId);
+    } else {
+      const { subscriptionId, subscriptionItemId } = await createSubscriptionWithShop({
+        customerId: company.stripe_customer_id,
+        shopId: shop.id,
+      });
+      await companyRepository.setStripeSubscriptionId(company.id, subscriptionId);
+      await shopRepository.setStripeSubscriptionItemId(shop.id, subscriptionItemId);
+    }
+  } catch (err) {
+    await shopRepository.softDeleteShop(shop.id);
+    logger.error({ err, shopId: shop.id }, 'Rolled back shop creation after billing failure');
+    throw err;
+  }
+
+  const created = await shopRepository.findActiveShopByIdForCompany(shop.id, company.id);
+  return toResponse(created);
 }
 
 export async function listMyShops(ownerUserId) {
@@ -76,11 +109,31 @@ export async function updateMyShop(ownerUserId, shopId, data) {
 }
 
 export async function deleteMyShop(ownerUserId, shopId) {
-  const shop = await getMyShopOrThrow(ownerUserId, shopId);
+  const company = await getMyActiveCompanyOrThrow(ownerUserId);
+  const shop = await shopRepository.findActiveShopByIdForCompany(shopId, company.id);
+  if (!shop) {
+    throw new AppError('Shop not found', 404);
+  }
+
+  // Billing is updated BEFORE the shop row is soft-deleted (opposite order
+  // to creation, deliberately): we want certainty that billing actually
+  // stopped before marking the shop closed, rather than risking a closed
+  // shop that's still being charged for.
+  const activeCount = await shopRepository.countActiveShopsForCompany(company.id);
+
+  if (activeCount <= 1 && company.stripe_subscription_id) {
+    // Last shop. Deleting the final item on a subscription is ambiguous in
+    // Stripe, so cancel the whole subscription at period end instead - the
+    // company keeps access for the cycle they've already paid for.
+    await cancelSubscriptionAtPeriodEnd({ subscriptionId: company.stripe_subscription_id });
+    // Cleared so that adding a shop later starts a fresh subscription
+    // rather than trying to reuse a cancelled one.
+    await companyRepository.setStripeSubscriptionId(company.id, null);
+  } else if (shop.stripe_subscription_item_id) {
+    await removeShopSubscriptionItem({ subscriptionItemId: shop.stripe_subscription_item_id });
+  }
+
   await shopRepository.softDeleteShop(shop.id);
-  // NOTE (Module 3 dependency): closing a shop should also remove/adjust
-  // its per-shop subscription line item on the billing side. No billing
-  // module exists yet to hook into - revisit this when Module 3 is built.
 }
 
 /**

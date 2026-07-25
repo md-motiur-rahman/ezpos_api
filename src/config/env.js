@@ -21,6 +21,8 @@ const requiredVars = [
   "EMAIL_FROM",
   "FRONTEND_URL",
   'JWT_ACCESS_SECRET',
+  'STRIPE_SECRET_KEY',
+  'STRIPE_SHOP_PRICE_ID',
 ];
 
 function validateEnv() {
@@ -56,5 +58,7 @@ export const env = {
   emailFrom: process.env.EMAIL_FROM,
   frontendUrl: process.env.FRONTEND_URL,
   jwtAccessSecret: process.env.JWT_ACCESS_SECRET,
+  stripeShopPriceId: process.env.STRIPE_SHOP_PRICE_ID,
+  stripeSecretKey: process.env.STRIPE_SECRET_KEY,
   
 };

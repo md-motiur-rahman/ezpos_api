@@ -10,12 +10,14 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
+    "pretest": "NODE_ENV=test npm run migrate:up",
     "test": "NODE_ENV=test node --test",
     "migrate:create": "node-pg-migrate create --migrations-dir src/db/migrations --",
-    "migrate:up": "node-pg-migrate up --migrations-dir src/db/migrations",
-    "migrate:down": "node-pg-migrate down --migrations-dir src/db/migrations"
+    "migrate:up": "node-pg-migrate up --migrations-dir src/db/migrations --envPath .env.${NODE_ENV:-development}",
+    "migrate:down": "node-pg-migrate down --migrations-dir src/db/migrations --envPath .env.${NODE_ENV:-development}"
   },
   "dependencies": {
+    "bcrypt": "^6.0.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
@@ -23,7 +25,9 @@
     "helmet": "^8.0.0",
     "pg": "^8.22.0",
     "pino": "^10.3.1",
-    "pino-http": "^11.0.0"
+    "pino-http": "^11.0.0",
+    "resend": "^6.18.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "node-pg-migrate": "^9.0.0",

@@ -33,3 +33,19 @@ Backend API for the Enterprise POS System.
 ```
 
 ## Project structure
+
+
+## Local Postgres (Docker)
+
+This project's local dev database runs in Docker, mapped to **port 5433** on the host
+(not the default 5432) to avoid clashing with any native Postgres install on your machine:
+
+```bash
+docker run --name epos-db \
+  -e POSTGRES_PASSWORD=yourpassword \
+  -e POSTGRES_DB=ezpos-db \
+  -p 5433:5432 \
+  -d postgres:16
+```
+
+Because of that mapping, **`DATABASE_URL` in both `.env.development` and `.env.test` must use port 5433**, e.g.:

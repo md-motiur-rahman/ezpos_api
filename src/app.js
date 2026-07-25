@@ -8,6 +8,7 @@ import { checkDbConnection } from './db/pool.js';
 import { logger } from './utils/logger.js';
 import { AppError } from './utils/AppError.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
+import authRoutes from './modules/auth/auth.routes.js';
 
 const app = express();
 
@@ -65,7 +66,7 @@ app.get('/health', async (req, res) => {
 });
 
 // --- Module routes will be mounted here as they're built ---
-// e.g. app.use('/api/auth', authRoutes);   <- Module 1
+app.use('/api/auth', authRoutes);
 // e.g. app.use('/api/companies', companyRoutes); <- Module 2
 
 app.use(notFoundHandler);

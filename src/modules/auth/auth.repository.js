@@ -103,3 +103,18 @@ export async function findValidRefreshToken(tokenHash) {
 export async function revokeRefreshToken(id) {
   await query(`UPDATE refresh_tokens SET revoked_at = now() WHERE id = $1`, [id]);
 }
+
+export async function updatePassword(userId, passwordHash) {
+  await query(`UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2`, [
+    passwordHash,
+    userId,
+  ]);
+}
+
+/** Used on password reset - any existing sessions should not survive it. */
+export async function revokeAllRefreshTokensForUser(userId) {
+  await query(
+    `UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`,
+    [userId]
+  );
+}

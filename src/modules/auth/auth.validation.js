@@ -24,3 +24,12 @@ export const refreshSchema = z.object({
 });
 
 export const logoutSchema = refreshSchema;
+
+export const forgotPasswordSchema = z.object({
+  email: z.string().trim().email('Must be a valid email address'),
+});
+
+export const resetPasswordSchema = z.object({
+  token: z.string().min(1, 'Token is required'),
+  newPassword: z.string().min(10, 'Password must be at least 10 characters'),
+});

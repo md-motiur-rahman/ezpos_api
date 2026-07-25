@@ -4,18 +4,20 @@ import config from '../../config/index.js';
 import { AppError } from '../../utils/AppError.js';
 import { sendEmail } from '../../utils/mailer.js';
 import { logger } from '../../utils/logger.js';
-import * as authRepository from './auth.repository.js';
-import { verificationEmail } from './auth.emailTemplates.js';
 import { signAccessToken } from '../../utils/jwt.js';
+import * as authRepository from './auth.repository.js';
+import { verificationEmail, passwordResetEmail } from './auth.emailTemplates.js';
 
 const BCRYPT_SALT_ROUNDS = 12;
 const EMAIL_VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
-const POSTGRES_UNIQUE_VIOLATION = '23505';
+const PASSWORD_RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const POSTGRES_UNIQUE_VIOLATION = '23505';
 
 function hashPassword(password) {
   return bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
 }
+
 function comparePassword(password, hash) {
   return bcrypt.compare(password, hash);
 }
@@ -31,32 +33,44 @@ export function generateToken() {
   return { raw, hash };
 }
 
-async function issueEmailVerificationToken(user) {
+/**
+ * Shared by both email verification and password reset: generate a token,
+ * replace any existing unused one of the same purpose, store the hash, and
+ * email the raw value. Send failure is logged but non-fatal (see registerUser).
+ */
+async function issueToken(user, { purpose, ttlMs, buildEmail }) {
   const { raw, hash } = generateToken();
 
-  // Only one valid verification token should exist per user at a time.
-  await authRepository.deleteUnusedTokens({ userId: user.id, purpose: 'email_verification' });
+  await authRepository.deleteUnusedTokens({ userId: user.id, purpose });
   await authRepository.createVerificationToken({
     userId: user.id,
     tokenHash: hash,
-    purpose: 'email_verification',
-    expiresAt: new Date(Date.now() + EMAIL_VERIFICATION_TOKEN_TTL_MS),
+    purpose,
+    expiresAt: new Date(Date.now() + ttlMs),
   });
 
-  const verifyUrl = `${config.env.frontendUrl}/verify-email?token=${raw}`;
-
+  const { subject, html } = buildEmail(raw);
   try {
-    await sendEmail({
-      to: user.email,
-      subject: verificationEmail(verifyUrl).subject,
-      html: verificationEmail(verifyUrl).html,
-    });
+    await sendEmail({ to: user.email, subject, html });
   } catch (err) {
-    // Non-fatal: the user account still exists and can request another
-    // email via resend-verification. We don't want a flaky email provider
-    // to make registration itself fail after the user row is already created.
-    logger.error({ err, userId: user.id }, 'Failed to send verification email');
+    logger.error({ err, userId: user.id, purpose }, `Failed to send ${purpose} email`);
   }
+}
+
+function issueEmailVerificationToken(user) {
+  return issueToken(user, {
+    purpose: 'email_verification',
+    ttlMs: EMAIL_VERIFICATION_TOKEN_TTL_MS,
+    buildEmail: (raw) => verificationEmail(`${config.env.frontendUrl}/verify-email?token=${raw}`),
+  });
+}
+
+function issuePasswordResetToken(user) {
+  return issueToken(user, {
+    purpose: 'password_reset',
+    ttlMs: PASSWORD_RESET_TOKEN_TTL_MS,
+    buildEmail: (raw) => passwordResetEmail(`${config.env.frontendUrl}/reset-password?token=${raw}`),
+  });
 }
 
 export async function registerUser({ email, password, fullName }) {
@@ -96,10 +110,6 @@ export async function verifyEmail({ token }) {
 export async function resendVerification({ email }) {
   const user = await authRepository.findUserByEmail(email);
 
-  // Deliberately do not reveal whether the email exists - same response
-  // either way, so this endpoint can't be used to enumerate registered
-  // accounts. If the account is real and unverified, an email goes out;
-  // otherwise nothing happens.
   if (!user || user.email_verified_at) {
     return;
   }
@@ -107,6 +117,7 @@ export async function resendVerification({ email }) {
   await issueEmailVerificationToken(user);
 }
 
+/** Creates + stores a new refresh token for a user, returns the raw value. */
 async function issueRefreshToken(userId) {
   const { raw, hash } = generateToken();
   await authRepository.createRefreshToken({
@@ -158,4 +169,28 @@ export async function logout({ refreshToken }) {
   if (tokenRow) {
     await authRepository.revokeRefreshToken(tokenRow.id);
   }
+}
+
+export async function forgotPassword({ email }) {
+  const user = await authRepository.findUserByEmail(email);
+
+  if (!user) {
+    return;
+  }
+
+  await issuePasswordResetToken(user);
+}
+
+export async function resetPassword({ token, newPassword }) {
+  const hash = crypto.createHash('sha256').update(token).digest('hex');
+  const tokenRow = await authRepository.findValidToken({ tokenHash: hash, purpose: 'password_reset' });
+
+  if (!tokenRow) {
+    throw new AppError('This password reset link is invalid or has expired', 400);
+  }
+
+  const passwordHash = await hashPassword(newPassword);
+  await authRepository.updatePassword(tokenRow.user_id, passwordHash);
+  await authRepository.markTokenUsed(tokenRow.id);
+  await authRepository.revokeAllRefreshTokensForUser(tokenRow.user_id);
 }

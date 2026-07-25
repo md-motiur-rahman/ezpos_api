@@ -11,6 +11,9 @@ import * as companyRepository from '../company/company.repository.js';
 import * as shopRepository from './shop.repository.js';
 import * as shopAddonRepository from './shopAddon.repository.js';
 
+const TRIAL_PERIOD_DAYS = 14;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 function toResponse(shop) {
   return {
     id: shop.id,
@@ -68,11 +71,23 @@ export async function createShop(ownerUserId, data) {
       });
       await shopRepository.setStripeSubscriptionItemId(shop.id, itemId);
     } else {
+      // The trial is granted once per company, ever. A company that closed
+      // all its shops and reopened gets a fresh subscription but no second
+      // free trial - trial_ends_at being already set is what marks it used.
+      const isFirstEverSubscription = !company.trial_ends_at;
+
       const { subscriptionId, subscriptionItemId } = await createSubscriptionWithShop({
         customerId: company.stripe_customer_id,
         shopId: shop.id,
+        trialDays: isFirstEverSubscription ? TRIAL_PERIOD_DAYS : null,
       });
       await companyRepository.setStripeSubscriptionId(company.id, subscriptionId);
+      if (isFirstEverSubscription) {
+        await companyRepository.setTrialEndsAt(
+          company.id,
+          new Date(Date.now() + TRIAL_PERIOD_DAYS * DAY_MS)
+        );
+      }
       await shopRepository.setStripeSubscriptionItemId(shop.id, subscriptionItemId);
     }
   } catch (err) {

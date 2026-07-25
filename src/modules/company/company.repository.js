@@ -3,7 +3,8 @@ import { buildUpdateSet } from '../../utils/sql.js';
 
 const COLUMNS = `id, owner_user_id, name, address_line1, address_line2, city, postcode,
                  country, phone, vat_number, company_number, business_type,
-                 stripe_customer_id, stripe_subscription_id, created_at, updated_at`;
+                 stripe_customer_id, stripe_subscription_id, trial_ends_at,
+                 created_at, updated_at`;
 
 export async function findActiveCompanyByOwner(ownerUserId) {
   const { rows } = await query(
@@ -84,6 +85,17 @@ export async function setStripeCustomerId(companyId, stripeCustomerId) {
 export async function setStripeSubscriptionId(companyId, stripeSubscriptionId) {
   await query(`UPDATE companies SET stripe_subscription_id = $1, updated_at = now() WHERE id = $2`, [
     stripeSubscriptionId,
+    companyId,
+  ]);
+}
+
+/**
+ * Written exactly once per company, when its first subscription is created.
+ * Never cleared - a non-null value permanently marks the trial as used up.
+ */
+export async function setTrialEndsAt(companyId, trialEndsAt) {
+  await query(`UPDATE companies SET trial_ends_at = $1, updated_at = now() WHERE id = $2`, [
+    trialEndsAt,
     companyId,
   ]);
 }

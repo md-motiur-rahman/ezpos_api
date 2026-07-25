@@ -18,6 +18,9 @@ function toResponse(company) {
     vatNumber: company.vat_number,
     companyNumber: company.company_number,
     businessType: company.business_type,
+    // User-facing (unlike stripe_customer_id / stripe_subscription_id, which
+    // stay internal) - the dashboard needs it to show "X days left in trial".
+    trialEndsAt: company.trial_ends_at,
     createdAt: company.created_at,
     updatedAt: company.updated_at,
   };

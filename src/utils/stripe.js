@@ -44,21 +44,27 @@ export async function createStripeCustomer({ email, name, companyId }) {
  * item. Stripe can't create a Subscription with zero items, which is why
  * this happens at first-shop time rather than at company setup (3.1).
  *
- * Returns { subscriptionId, subscriptionItemId }.
+ * `trialDays` is only passed for a company's very first subscription - see
+ * shop.service.js for why (closing all shops and reopening must not grant a
+ * second free trial).
  *
- * NOTE (Module 3.4): the 14-day trial gets configured here, via
- * `trial_period_days` on this create call.
+ * Returns { subscriptionId, subscriptionItemId }.
  */
-export async function createSubscriptionWithShop({ customerId, shopId }) {
+export async function createSubscriptionWithShop({ customerId, shopId, trialDays }) {
   if (config.env.isTest) {
     return { subscriptionId: fakeId('sub'), subscriptionItemId: fakeId('si') };
   }
 
+  const params = {
+    customer: customerId,
+    items: [{ price: config.env.stripeShopPriceId, metadata: { shopId } }],
+  };
+  if (trialDays) {
+    params.trial_period_days = trialDays;
+  }
+
   try {
-    const subscription = await stripe.subscriptions.create({
-      customer: customerId,
-      items: [{ price: config.env.stripeShopPriceId, metadata: { shopId } }],
-    });
+    const subscription = await stripe.subscriptions.create(params);
     return {
       subscriptionId: subscription.id,
       subscriptionItemId: subscription.items.data[0].id,

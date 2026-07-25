@@ -145,3 +145,94 @@ test('DELETE /api/companies/mine soft-deletes and GET afterward returns 404', as
   const getRes = await request(app).get('/api/companies/mine').set('Authorization', authHeaderFor(userId));
   assert.equal(getRes.status, 404);
 });
+
+// --- POST /api/companies/mine/business-type ---
+
+test('POST /api/companies/mine/business-type sets the value to single', async () => {
+  const userId = await insertUser();
+  await request(app).post('/api/companies').set('Authorization', authHeaderFor(userId)).send(VALID_COMPANY);
+
+  const res = await request(app)
+    .post('/api/companies/mine/business-type')
+    .set('Authorization', authHeaderFor(userId))
+    .send({ businessType: 'single' });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.businessType, 'single');
+});
+
+test('POST /api/companies/mine/business-type sets the value to chain', async () => {
+  const userId = await insertUser();
+  await request(app).post('/api/companies').set('Authorization', authHeaderFor(userId)).send(VALID_COMPANY);
+
+  const res = await request(app)
+    .post('/api/companies/mine/business-type')
+    .set('Authorization', authHeaderFor(userId))
+    .send({ businessType: 'chain' });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.businessType, 'chain');
+});
+
+test('POST /api/companies/mine/business-type allows switching direction freely for now', async () => {
+  const userId = await insertUser();
+  await request(app).post('/api/companies').set('Authorization', authHeaderFor(userId)).send(VALID_COMPANY);
+
+  await request(app)
+    .post('/api/companies/mine/business-type')
+    .set('Authorization', authHeaderFor(userId))
+    .send({ businessType: 'chain' });
+  const res = await request(app)
+    .post('/api/companies/mine/business-type')
+    .set('Authorization', authHeaderFor(userId))
+    .send({ businessType: 'single' });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.businessType, 'single');
+});
+
+test('POST /api/companies/mine/business-type rejects an invalid value', async () => {
+  const userId = await insertUser();
+  await request(app).post('/api/companies').set('Authorization', authHeaderFor(userId)).send(VALID_COMPANY);
+
+  const res = await request(app)
+    .post('/api/companies/mine/business-type')
+    .set('Authorization', authHeaderFor(userId))
+    .send({ businessType: 'franchise' });
+
+  assert.equal(res.status, 400);
+});
+
+test('POST /api/companies/mine/business-type returns 404 with no active company', async () => {
+  const userId = await insertUser();
+
+  const res = await request(app)
+    .post('/api/companies/mine/business-type')
+    .set('Authorization', authHeaderFor(userId))
+    .send({ businessType: 'single' });
+
+  assert.equal(res.status, 404);
+});
+
+test('POST /api/companies/mine/business-type rejects requests with no auth token', async () => {
+  const res = await request(app).post('/api/companies/mine/business-type').send({ businessType: 'single' });
+
+  assert.equal(res.status, 401);
+});
+
+test('GET /api/companies/mine reflects businessType, including null before it is ever set', async () => {
+  const userId = await insertUser();
+  const createRes = await request(app)
+    .post('/api/companies')
+    .set('Authorization', authHeaderFor(userId))
+    .send(VALID_COMPANY);
+  assert.equal(createRes.body.businessType, null);
+
+  await request(app)
+    .post('/api/companies/mine/business-type')
+    .set('Authorization', authHeaderFor(userId))
+    .send({ businessType: 'chain' });
+
+  const getRes = await request(app).get('/api/companies/mine').set('Authorization', authHeaderFor(userId));
+  assert.equal(getRes.body.businessType, 'chain');
+});

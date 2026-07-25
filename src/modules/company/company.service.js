@@ -15,6 +15,7 @@ function toResponse(company) {
     phone: company.phone,
     vatNumber: company.vat_number,
     companyNumber: company.company_number,
+    businessType: company.business_type,
     createdAt: company.created_at,
     updatedAt: company.updated_at,
   };
@@ -55,4 +56,13 @@ export async function updateMyCompany(ownerUserId, data) {
 export async function deleteMyCompany(ownerUserId) {
   const company = await getActiveCompanyOrThrow(ownerUserId);
   await companyRepository.softDeleteCompany(company.id);
+}
+
+export async function setBusinessType(ownerUserId, { businessType }) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  // NOTE: no restriction on switching chain -> single yet, even if the
+  // company already has multiple shops - that check needs the shops table,
+  // which doesn't exist until Module 2.3. Guard to be added there.
+  const updated = await companyRepository.setBusinessType(company.id, businessType);
+  return toResponse(updated);
 }

@@ -13,3 +13,7 @@ export const createCompanySchema = z.object({
 });
 
 export const updateCompanySchema = createCompanySchema.partial();
+
+export const businessTypeSchema = z.object({
+  businessType: z.enum(['single', 'chain']),
+});

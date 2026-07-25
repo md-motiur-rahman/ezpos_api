@@ -1,7 +1,7 @@
 import { query } from '../../db/pool.js';
 
 const COLUMNS = `id, owner_user_id, name, address_line1, address_line2, city, postcode,
-                 country, phone, vat_number, company_number, created_at, updated_at`;
+                 country, phone, vat_number, company_number, business_type, created_at, updated_at`;
 
 export async function findActiveCompanyByOwner(ownerUserId) {
   const { rows } = await query(
@@ -70,4 +70,12 @@ export async function softDeleteCompany(companyId) {
   await query(`UPDATE companies SET deleted_at = now(), updated_at = now() WHERE id = $1`, [
     companyId,
   ]);
+}
+
+export async function setBusinessType(companyId, businessType) {
+  const { rows } = await query(
+    `UPDATE companies SET business_type = $1, updated_at = now() WHERE id = $2 RETURNING ${COLUMNS}`,
+    [businessType, companyId]
+  );
+  return rows[0];
 }

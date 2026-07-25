@@ -41,6 +41,7 @@ const VALID_SHOP = {
   postcode: 'E1 1AA',
   country: 'UK',
   phone: '02011112222',
+  vatRegistered: true,
 };
 
 /** Creates a user + company, optionally setting business_type, returns the auth header + userId. */
@@ -274,4 +275,82 @@ test('switching business_type to chain is always allowed regardless of shop coun
     .send({ businessType: 'chain' });
 
   assert.equal(res.status, 200);
+});
+
+// --- Shop settings (Module 2.4): kdsEnabled, rotaEnabled, vatRegistered, defaultVatRate ---
+
+test('POST /api/shops rejects a missing vatRegistered', async () => {
+  const { header } = await setupOwnerWithCompany('single');
+  const { vatRegistered, ...withoutVatRegistered } = VALID_SHOP;
+
+  const res = await request(app).post('/api/shops').set('Authorization', header).send(withoutVatRegistered);
+
+  assert.equal(res.status, 400);
+});
+
+test('POST /api/shops defaults kdsEnabled and rotaEnabled to false when not provided', async () => {
+  const { header } = await setupOwnerWithCompany('single');
+
+  const res = await request(app).post('/api/shops').set('Authorization', header).send(VALID_SHOP);
+
+  assert.equal(res.status, 201);
+  assert.equal(res.body.kdsEnabled, false);
+  assert.equal(res.body.rotaEnabled, false);
+});
+
+test('POST /api/shops accepts explicit kdsEnabled, rotaEnabled, and defaultVatRate', async () => {
+  const { header } = await setupOwnerWithCompany('single');
+
+  const res = await request(app)
+    .post('/api/shops')
+    .set('Authorization', header)
+    .send({ ...VALID_SHOP, kdsEnabled: true, rotaEnabled: true, defaultVatRate: 20 });
+
+  assert.equal(res.status, 201);
+  assert.equal(res.body.kdsEnabled, true);
+  assert.equal(res.body.rotaEnabled, true);
+  assert.equal(res.body.defaultVatRate, 20);
+});
+
+test('POST /api/shops rejects a defaultVatRate outside 0-100', async () => {
+  const { header } = await setupOwnerWithCompany('single');
+
+  const res = await request(app)
+    .post('/api/shops')
+    .set('Authorization', header)
+    .send({ ...VALID_SHOP, defaultVatRate: 150 });
+
+  assert.equal(res.status, 400);
+});
+
+test('PATCH /api/shops/:id toggles kdsEnabled independently of other settings', async () => {
+  const { header } = await setupOwnerWithCompany('single');
+  const created = await request(app).post('/api/shops').set('Authorization', header).send(VALID_SHOP);
+
+  const res = await request(app)
+    .patch(`/api/shops/${created.body.id}`)
+    .set('Authorization', header)
+    .send({ kdsEnabled: true });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.kdsEnabled, true);
+  assert.equal(res.body.rotaEnabled, false); // untouched
+  assert.equal(res.body.vatRegistered, true); // untouched
+});
+
+test('PATCH /api/shops/:id updates vatRegistered and defaultVatRate together', async () => {
+  const { header } = await setupOwnerWithCompany('single');
+  const created = await request(app)
+    .post('/api/shops')
+    .set('Authorization', header)
+    .send({ ...VALID_SHOP, vatRegistered: false });
+
+  const res = await request(app)
+    .patch(`/api/shops/${created.body.id}`)
+    .set('Authorization', header)
+    .send({ vatRegistered: true, defaultVatRate: 20 });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.vatRegistered, true);
+  assert.equal(res.body.defaultVatRate, 20);
 });

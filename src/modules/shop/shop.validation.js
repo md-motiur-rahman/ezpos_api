@@ -8,6 +8,10 @@ export const createShopSchema = z.object({
   postcode: z.string().trim().min(1, 'Postcode is required'),
   country: z.string().trim().min(1, 'Country is required'),
   phone: z.string().trim().min(1, 'Phone number is required'),
+  kdsEnabled: z.boolean().optional(),
+  rotaEnabled: z.boolean().optional(),
+  vatRegistered: z.boolean(),
+  defaultVatRate: z.number().min(0).max(100).optional(),
 });
 
 export const updateShopSchema = createShopSchema.partial();

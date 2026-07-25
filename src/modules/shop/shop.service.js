@@ -12,6 +12,12 @@ function toResponse(shop) {
     postcode: shop.postcode,
     country: shop.country,
     phone: shop.phone,
+    kdsEnabled: shop.kds_enabled,
+    rotaEnabled: shop.rota_enabled,
+    vatRegistered: shop.vat_registered,
+    // pg returns NUMERIC columns as strings (to avoid float precision loss) -
+    // convert to a real number for the API response.
+    defaultVatRate: shop.default_vat_rate === null ? null : Number(shop.default_vat_rate),
     createdAt: shop.created_at,
     updatedAt: shop.updated_at,
   };

@@ -1,4 +1,5 @@
 import { query } from '../../db/pool.js';
+import { buildUpdateSet } from '../../utils/sql.js';
 
 const COLUMNS = `id, owner_user_id, name, address_line1, address_line2, city, postcode,
                  country, phone, vat_number, company_number, business_type, created_at, updated_at`;
@@ -48,19 +49,10 @@ export async function updateCompany(companyId, data) {
     companyNumber: 'company_number',
   };
 
-  const setClauses = [];
-  const values = [];
-  for (const [key, column] of Object.entries(fieldMap)) {
-    if (data[key] !== undefined) {
-      values.push(data[key]);
-      setClauses.push(`${column} = $${values.length}`);
-    }
-  }
-  setClauses.push('updated_at = now()');
-
+  const { clause, values } = buildUpdateSet(fieldMap, data);
   values.push(companyId);
   const { rows } = await query(
-    `UPDATE companies SET ${setClauses.join(', ')} WHERE id = $${values.length} RETURNING ${COLUMNS}`,
+    `UPDATE companies SET ${clause} WHERE id = $${values.length} RETURNING ${COLUMNS}`,
     values
   );
   return rows[0];

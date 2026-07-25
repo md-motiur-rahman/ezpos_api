@@ -1,7 +1,9 @@
 import { query } from '../../db/pool.js';
+import { buildUpdateSet } from '../../utils/sql.js';
 
 const COLUMNS = `id, company_id, name, address_line1, address_line2, city, postcode,
-                 country, phone, created_at, updated_at`;
+                 country, phone, kds_enabled, rota_enabled, vat_registered,
+                 default_vat_rate, created_at, updated_at`;
 
 export async function countActiveShopsForCompany(companyId) {
   const { rows } = await query(
@@ -13,8 +15,10 @@ export async function countActiveShopsForCompany(companyId) {
 
 export async function createShop(companyId, data) {
   const { rows } = await query(
-    `INSERT INTO shops (company_id, name, address_line1, address_line2, city, postcode, country, phone)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `INSERT INTO shops
+       (company_id, name, address_line1, address_line2, city, postcode, country, phone,
+        kds_enabled, rota_enabled, vat_registered, default_vat_rate)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      RETURNING ${COLUMNS}`,
     [
       companyId,
@@ -25,6 +29,10 @@ export async function createShop(companyId, data) {
       data.postcode,
       data.country,
       data.phone,
+      data.kdsEnabled ?? false,
+      data.rotaEnabled ?? false,
+      data.vatRegistered,
+      data.defaultVatRate ?? null,
     ]
   );
   return rows[0];
@@ -60,21 +68,16 @@ export async function updateShop(id, data) {
     postcode: 'postcode',
     country: 'country',
     phone: 'phone',
+    kdsEnabled: 'kds_enabled',
+    rotaEnabled: 'rota_enabled',
+    vatRegistered: 'vat_registered',
+    defaultVatRate: 'default_vat_rate',
   };
 
-  const setClauses = [];
-  const values = [];
-  for (const [key, column] of Object.entries(fieldMap)) {
-    if (data[key] !== undefined) {
-      values.push(data[key]);
-      setClauses.push(`${column} = $${values.length}`);
-    }
-  }
-  setClauses.push('updated_at = now()');
-
+  const { clause, values } = buildUpdateSet(fieldMap, data);
   values.push(id);
   const { rows } = await query(
-    `UPDATE shops SET ${setClauses.join(', ')} WHERE id = $${values.length} RETURNING ${COLUMNS}`,
+    `UPDATE shops SET ${clause} WHERE id = $${values.length} RETURNING ${COLUMNS}`,
     values
   );
   return rows[0];

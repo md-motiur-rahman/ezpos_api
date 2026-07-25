@@ -6,13 +6,18 @@ import { sendEmail } from '../../utils/mailer.js';
 import { logger } from '../../utils/logger.js';
 import * as authRepository from './auth.repository.js';
 import { verificationEmail } from './auth.emailTemplates.js';
+import { signAccessToken } from '../../utils/jwt.js';
 
 const BCRYPT_SALT_ROUNDS = 12;
 const EMAIL_VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const POSTGRES_UNIQUE_VIOLATION = '23505';
+const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 function hashPassword(password) {
   return bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
+}
+function comparePassword(password, hash) {
+  return bcrypt.compare(password, hash);
 }
 
 /**
@@ -100,4 +105,57 @@ export async function resendVerification({ email }) {
   }
 
   await issueEmailVerificationToken(user);
+}
+
+async function issueRefreshToken(userId) {
+  const { raw, hash } = generateToken();
+  await authRepository.createRefreshToken({
+    userId,
+    tokenHash: hash,
+    expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
+  });
+  return raw;
+}
+
+export async function login({ email, password }) {
+  const user = await authRepository.findUserByEmail(email);
+
+  if (!user || !(await comparePassword(password, user.password_hash))) {
+    throw new AppError('Invalid email or password', 401);
+  }
+
+  if (!user.email_verified_at) {
+    throw new AppError('Please verify your email before logging in', 403);
+  }
+
+  const accessToken = signAccessToken(user);
+  const refreshToken = await issueRefreshToken(user.id);
+
+  return { accessToken, refreshToken, user: { id: user.id, email: user.email } };
+}
+
+export async function refresh({ refreshToken }) {
+  const hash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+  const tokenRow = await authRepository.findValidRefreshToken(hash);
+
+  if (!tokenRow) {
+    throw new AppError('Invalid or expired refresh token', 401);
+  }
+
+  await authRepository.revokeRefreshToken(tokenRow.id);
+
+  const user = await authRepository.findUserById(tokenRow.user_id);
+  const accessToken = signAccessToken(user);
+  const newRefreshToken = await issueRefreshToken(user.id);
+
+  return { accessToken, refreshToken: newRefreshToken };
+}
+
+export async function logout({ refreshToken }) {
+  const hash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+  const tokenRow = await authRepository.findValidRefreshToken(hash);
+
+  if (tokenRow) {
+    await authRepository.revokeRefreshToken(tokenRow.id);
+  }
 }

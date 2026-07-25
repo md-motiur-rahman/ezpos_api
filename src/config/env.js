@@ -20,6 +20,7 @@ const requiredVars = [
   "RESEND_API_KEY",
   "EMAIL_FROM",
   "FRONTEND_URL",
+  'JWT_ACCESS_SECRET',
 ];
 
 function validateEnv() {
@@ -54,4 +55,6 @@ export const env = {
   resendApiKey: process.env.RESEND_API_KEY,
   emailFrom: process.env.EMAIL_FROM,
   frontendUrl: process.env.FRONTEND_URL,
+  jwtAccessSecret: process.env.JWT_ACCESS_SECRET,
+  
 };

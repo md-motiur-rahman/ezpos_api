@@ -20,3 +20,18 @@ export const resendVerification = asyncHandler(async (req, res) => {
     message: 'If that account exists and is unverified, a new verification email has been sent.',
   });
 });
+
+export const login = asyncHandler(async (req, res) => {
+  const result = await authService.login(req.body);
+  res.status(200).json(result);
+});
+
+export const refresh = asyncHandler(async (req, res) => {
+  const result = await authService.refresh(req.body);
+  res.status(200).json(result);
+});
+
+export const logout = asyncHandler(async (req, res) => {
+  await authService.logout(req.body);
+  res.status(200).json({ message: 'Logged out.' });
+});

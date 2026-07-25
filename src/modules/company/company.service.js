@@ -1,4 +1,5 @@
 import { AppError } from '../../utils/AppError.js';
+import { createStripeCustomer } from '../../utils/stripe.js';
 import * as companyRepository from './company.repository.js';
 import * as shopService from '../shop/shop.service.js';
 
@@ -59,7 +60,7 @@ export async function deleteMyCompany(ownerUserId) {
   await companyRepository.softDeleteCompany(company.id);
 }
 
-export async function setBusinessType(ownerUserId, { businessType }) {
+export async function setBusinessType(ownerUserId, ownerEmail, { businessType }) {
   const company = await getActiveCompanyOrThrow(ownerUserId);
 
   if (businessType === 'single') {
@@ -70,6 +71,19 @@ export async function setBusinessType(ownerUserId, { businessType }) {
         409
       );
     }
+  }
+
+  // Create the Stripe customer the first time a business commits to a
+  // business_type - idempotent, only happens once per company. This is
+  // billing-neutral (no subscription yet, no cost) - Module 3.2 creates
+  // the actual Subscription once a shop's line item exists.
+  if (!company.stripe_customer_id) {
+    const stripeCustomerId = await createStripeCustomer({
+      email: ownerEmail,
+      name: company.name,
+      companyId: company.id,
+    });
+    await companyRepository.setStripeCustomerId(company.id, stripeCustomerId);
   }
 
   const updated = await companyRepository.setBusinessType(company.id, businessType);

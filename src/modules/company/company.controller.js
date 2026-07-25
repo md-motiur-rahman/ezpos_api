@@ -22,6 +22,6 @@ export const deleteMyCompany = asyncHandler(async (req, res) => {
 });
 
 export const setBusinessType = asyncHandler(async (req, res) => {
-  const company = await companyService.setBusinessType(req.user.id, req.body);
+  const company = await companyService.setBusinessType(req.user.id, req.user.email, req.body);
   res.status(200).json(company);
 });

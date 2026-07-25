@@ -236,3 +236,53 @@ test('GET /api/companies/mine reflects businessType, including null before it is
   const getRes = await request(app).get('/api/companies/mine').set('Authorization', authHeaderFor(userId));
   assert.equal(getRes.body.businessType, 'chain');
 });
+
+// --- Stripe customer creation (Module 3.1) ---
+
+test('setting business_type for the first time creates a stripe_customer_id', async () => {
+  const userId = await insertUser();
+  await request(app).post('/api/companies').set('Authorization', authHeaderFor(userId)).send(VALID_COMPANY);
+
+  const { rows: before } = await query(
+    `SELECT stripe_customer_id FROM companies WHERE owner_user_id = $1`,
+    [userId]
+  );
+  assert.equal(before[0].stripe_customer_id, null);
+
+  await request(app)
+    .post('/api/companies/mine/business-type')
+    .set('Authorization', authHeaderFor(userId))
+    .send({ businessType: 'single' });
+
+  const { rows: after } = await query(
+    `SELECT stripe_customer_id FROM companies WHERE owner_user_id = $1`,
+    [userId]
+  );
+  assert.ok(after[0].stripe_customer_id);
+  assert.ok(after[0].stripe_customer_id.startsWith('cus_test_'));
+});
+
+test('setting business_type again does not create a second stripe_customer_id', async () => {
+  const userId = await insertUser();
+  await request(app).post('/api/companies').set('Authorization', authHeaderFor(userId)).send(VALID_COMPANY);
+
+  await request(app)
+    .post('/api/companies/mine/business-type')
+    .set('Authorization', authHeaderFor(userId))
+    .send({ businessType: 'chain' });
+  const { rows: first } = await query(
+    `SELECT stripe_customer_id FROM companies WHERE owner_user_id = $1`,
+    [userId]
+  );
+
+  await request(app)
+    .post('/api/companies/mine/business-type')
+    .set('Authorization', authHeaderFor(userId))
+    .send({ businessType: 'single' });
+  const { rows: second } = await query(
+    `SELECT stripe_customer_id FROM companies WHERE owner_user_id = $1`,
+    [userId]
+  );
+
+  assert.equal(first[0].stripe_customer_id, second[0].stripe_customer_id);
+});

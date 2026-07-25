@@ -2,7 +2,8 @@ import { query } from '../../db/pool.js';
 import { buildUpdateSet } from '../../utils/sql.js';
 
 const COLUMNS = `id, owner_user_id, name, address_line1, address_line2, city, postcode,
-                 country, phone, vat_number, company_number, business_type, created_at, updated_at`;
+                 country, phone, vat_number, company_number, business_type,
+                 stripe_customer_id, created_at, updated_at`;
 
 export async function findActiveCompanyByOwner(ownerUserId) {
   const { rows } = await query(
@@ -70,4 +71,11 @@ export async function setBusinessType(companyId, businessType) {
     [businessType, companyId]
   );
   return rows[0];
+}
+
+export async function setStripeCustomerId(companyId, stripeCustomerId) {
+  await query(`UPDATE companies SET stripe_customer_id = $1, updated_at = now() WHERE id = $2`, [
+    stripeCustomerId,
+    companyId,
+  ]);
 }

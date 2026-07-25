@@ -47,3 +47,8 @@ export const resetPassword = asyncHandler(async (req, res) => {
   await authService.resetPassword(req.body);
   res.status(200).json({ message: 'Password reset successfully.' });
 });
+
+export const confirmEmailChange = asyncHandler(async (req, res) => {
+  const result = await authService.confirmEmailChange(req.body);
+  res.status(200).json({ message: 'Email address updated.', email: result.email });
+});

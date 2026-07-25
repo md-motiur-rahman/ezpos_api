@@ -9,10 +9,15 @@ import { logger } from './utils/logger.js';
 import { AppError } from './utils/AppError.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 import authRoutes from './modules/auth/auth.routes.js';
+import meRoutes from './modules/auth/me.routes.js';
 
 const app = express();
 
 // --- CORS ---
+// Only allow browsers from known origins (the Next.js dashboard, etc.) to
+// call this API. Requests with no Origin header (native mobile apps, curl,
+// server-to-server calls) are always allowed - "Origin" is a browser concept.
+// In development, an empty allow-list means "allow everything" for convenience.
 const corsOptions = {
   origin(origin, callback) {
     const { corsAllowedOrigins, isDevelopment } = config.env;
@@ -29,9 +34,11 @@ const corsOptions = {
 };
 
 // --- Rate limiting ---
+// Global safety net against abuse/brute-force. Stricter, endpoint-specific
+// limits (e.g. PIN login) will be added in their own modules later.
 const rateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 300,
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  limit: 300, // requests per IP per window
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: { message: 'Too many requests, please try again later.' } },
@@ -46,6 +53,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(pinoHttp({ logger })); // structured request logging (method, path, status, duration)
 
 // --- Health check ---
+// Used to verify the API is up (load balancers, deploy checks, manual testing).
 app.get('/health', async (req, res) => {
   try {
     await checkDbConnection();
@@ -65,8 +73,9 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// --- Module routes will be mounted here as they're built ---
+// --- Module routes ---
 app.use('/api/auth', authRoutes);
+app.use('/api/me', meRoutes);
 // e.g. app.use('/api/companies', companyRoutes); <- Module 2
 
 app.use(notFoundHandler);

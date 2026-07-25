@@ -19,3 +19,25 @@ export function passwordResetEmail(resetUrl) {
     `,
   };
 }
+
+export function emailChangeConfirmation(confirmUrl) {
+  return {
+    subject: 'Confirm your new email address',
+    html: `
+      <p>Please confirm this is your new email address.</p>
+      <p><a href="${confirmUrl}">Confirm new email</a></p>
+      <p>This link expires in 24 hours. If you didn't request this, you can ignore this email.</p>
+    `,
+  };
+}
+
+export function emailChangeRequestedNotice(newEmail) {
+  return {
+    subject: 'Email change requested on your account',
+    html: `
+      <p>A request was made to change your account email to <strong>${newEmail}</strong>.</p>
+      <p>If this was you, no action is needed - the change takes effect once the new address is confirmed.</p>
+      <p>If this wasn't you, please change your password immediately and contact support.</p>
+    `,
+  };
+}

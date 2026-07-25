@@ -12,7 +12,7 @@ export async function findUserByEmail(email) {
 
 export async function findUserById(id) {
   const { rows } = await query(
-    `SELECT id, email, full_name, email_verified_at
+    `SELECT id, email, password_hash, full_name, email_verified_at, pending_email
      FROM users
      WHERE id = $1 AND deleted_at IS NULL`,
     [id]
@@ -77,10 +77,10 @@ export async function markTokenUsed(tokenId) {
  * a hard delete here (rather than soft-delete) is appropriate.
  */
 export async function deleteUnusedTokens({ userId, purpose }) {
-  await query(`DELETE FROM verification_tokens WHERE user_id = $1 AND purpose = $2 AND used_at IS NULL`, [
-    userId,
-    purpose,
-  ]);
+  await query(
+    `DELETE FROM verification_tokens WHERE user_id = $1 AND purpose = $2 AND used_at IS NULL`,
+    [userId, purpose]
+  );
 }
 
 export async function createRefreshToken({ userId, tokenHash, expiresAt }) {
@@ -117,4 +117,38 @@ export async function revokeAllRefreshTokensForUser(userId) {
     `UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`,
     [userId]
   );
+}
+
+export async function updateFullName(userId, fullName) {
+  const { rows } = await query(
+    `UPDATE users SET full_name = $1, updated_at = now() WHERE id = $2
+     RETURNING id, email, full_name, email_verified_at, pending_email`,
+    [fullName, userId]
+  );
+  return rows[0];
+}
+
+export async function setPendingEmail(userId, pendingEmail) {
+  await query(`UPDATE users SET pending_email = $1, updated_at = now() WHERE id = $2`, [
+    pendingEmail,
+    userId,
+  ]);
+}
+
+/**
+ * Commits a pending email change: the pending address becomes the real one,
+ * marked verified (clicking the confirmation link is the verification),
+ * and pending_email is cleared. Throws a Postgres unique-violation (23505)
+ * if the address was taken by someone else in the meantime - caught by the
+ * service layer, same pattern as createUser.
+ */
+export async function commitEmailChange(userId) {
+  const { rows } = await query(
+    `UPDATE users
+     SET email = pending_email, pending_email = NULL, email_verified_at = now(), updated_at = now()
+     WHERE id = $1
+     RETURNING id, email`,
+    [userId]
+  );
+  return rows[0];
 }

@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { requireActiveBilling } from '../../middleware/requireActiveBilling.js';
 import { validateBody, validateParams } from '../../middleware/validate.js';
 import * as shopAddonController from './shopAddon.controller.js';
 import {
@@ -11,8 +12,11 @@ import {
 // is visible here. requireAuth is already applied by the parent router.
 const router = Router({ mergeParams: true });
 
+// Activation is billing-gated (3.6) - it adds a new billable thing. Listing and
+// deactivation stay open so a locked owner can still see and reduce their bill.
 router.post(
   '/',
+  requireActiveBilling,
   validateParams(shopIdParamsSchema),
   validateBody(activateAddonSchema),
   shopAddonController.activateAddon

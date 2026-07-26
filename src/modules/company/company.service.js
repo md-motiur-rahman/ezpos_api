@@ -24,6 +24,9 @@ function toResponse(company) {
     // Kept in sync from Stripe webhooks (3.5). Null until the first
     // subscription event arrives.
     subscriptionStatus: company.subscription_status,
+    // Non-null means a payment has failed and this is the deadline to fix it
+    // before shop access is blocked (3.6). The dashboard uses this to prompt.
+    gracePeriodEndsAt: company.grace_period_ends_at,
     createdAt: company.created_at,
     updatedAt: company.updated_at,
   };

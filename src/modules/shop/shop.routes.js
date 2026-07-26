@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireAuth } from '../../middleware/requireAuth.js';
+import { requireActiveBilling } from '../../middleware/requireActiveBilling.js';
 import { validateBody, validateParams } from '../../middleware/validate.js';
 import * as shopController from './shop.controller.js';
 import shopAddonRoutes from './shopAddon.routes.js';
@@ -13,7 +14,10 @@ router.use(requireAuth);
 // more specific path wins - Express matches in definition order.
 router.use('/:shopId/addons', shopAddonRoutes);
 
-router.post('/', validateBody(createShopSchema), shopController.createShop);
+// Only creation is billing-gated (3.6): it adds a new billable thing. Listing,
+// viewing, editing and closing stay available while locked so an owner can see
+// and reduce their bill.
+router.post('/', requireActiveBilling, validateBody(createShopSchema), shopController.createShop);
 router.get('/', shopController.listMyShops);
 router.get('/:id', validateParams(shopIdParamSchema), shopController.getMyShop);
 router.patch(

@@ -1,6 +1,13 @@
+import config from '../../config/index.js';
 import { logger } from '../../utils/logger.js';
+import { sendEmail } from '../../utils/mailer.js';
 import * as companyRepository from '../company/company.repository.js';
+import * as authRepository from '../auth/auth.repository.js';
 import * as billingRepository from './billing.repository.js';
+import { paymentFailedWarningEmail } from './billing.emailTemplates.js';
+
+const GRACE_PERIOD_DAYS = 7;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** Event types we act on. Anything else is acknowledged and ignored. */
 const HANDLED_EVENT_TYPES = new Set([
@@ -21,6 +28,43 @@ async function findCompanyForEvent(event) {
     return null;
   }
   return companyRepository.findByStripeCustomerId(stripeCustomerId);
+}
+
+/**
+ * Starts the grace period on a company's FIRST payment failure and emails a
+ * warning. Does nothing if a grace period is already running: Stripe retries a
+ * failed invoice several times, and resetting the clock on each retry would push
+ * lockout out indefinitely so it never actually happened.
+ */
+async function startGracePeriodIfNeeded(company) {
+  if (company.grace_period_ends_at) {
+    logger.info(
+      { companyId: company.id },
+      'Payment failed again during an active grace period - clock not extended'
+    );
+    return;
+  }
+
+  const gracePeriodEndsAt = new Date(Date.now() + GRACE_PERIOD_DAYS * DAY_MS);
+  await companyRepository.setGracePeriodEndsAt(company.id, gracePeriodEndsAt);
+
+  // Non-fatal, same as every other email in this project: the grace period is
+  // already recorded, so a failed send doesn't change what happens next.
+  try {
+    const owner = await authRepository.findUserById(company.owner_user_id);
+    if (owner) {
+      await sendEmail({
+        to: owner.email,
+        ...paymentFailedWarningEmail({
+          companyName: company.name,
+          gracePeriodEndsAt,
+          billingUrl: `${config.env.frontendUrl}/billing`,
+        }),
+      });
+    }
+  } catch (err) {
+    logger.error({ err, companyId: company.id }, 'Failed to send payment failure warning email');
+  }
 }
 
 /**
@@ -49,11 +93,18 @@ export async function handleWebhookEvent(event) {
     case 'invoice.payment_succeeded':
       amount = object.amount_paid ?? null;
       status = 'succeeded';
+      // Payment recovered - end any grace period immediately.
+      if (company?.grace_period_ends_at) {
+        await companyRepository.setGracePeriodEndsAt(company.id, null);
+      }
       break;
 
     case 'invoice.payment_failed':
       amount = object.amount_due ?? null;
       status = 'failed';
+      if (company) {
+        await startGracePeriodIfNeeded(company);
+      }
       break;
 
     case 'customer.subscription.updated':

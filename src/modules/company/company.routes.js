@@ -1,8 +1,13 @@
 import { Router } from 'express';
 import { requireAuth } from '../../middleware/requireAuth.js';
-import { validateBody } from '../../middleware/validate.js';
+import { validateBody, validateQuery } from '../../middleware/validate.js';
 import * as companyController from './company.controller.js';
-import { createCompanySchema, updateCompanySchema, businessTypeSchema } from './company.validation.js';
+import {
+  createCompanySchema,
+  updateCompanySchema,
+  businessTypeSchema,
+  billingHistoryQuerySchema,
+} from './company.validation.js';
 
 const router = Router();
 
@@ -16,6 +21,13 @@ router.post(
   '/mine/business-type',
   validateBody(businessTypeSchema),
   companyController.setBusinessType
+);
+// Deliberately NOT behind requireActiveBilling (3.6): this is exactly the
+// visibility a locked-out owner needs to see what they owe and pay it.
+router.get(
+  '/mine/billing-history',
+  validateQuery(billingHistoryQuerySchema),
+  companyController.getBillingHistory
 );
 
 export default router;

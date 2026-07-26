@@ -17,3 +17,7 @@ export const updateCompanySchema = createCompanySchema.partial();
 export const businessTypeSchema = z.object({
   businessType: z.enum(['single', 'chain']),
 });
+
+export const billingHistoryQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(10),
+});

@@ -1,5 +1,5 @@
 import { AppError } from '../../utils/AppError.js';
-import { createStripeCustomer } from '../../utils/stripe.js';
+import { createStripeCustomer, listInvoices } from '../../utils/stripe.js';
 import * as companyRepository from './company.repository.js';
 import * as shopService from '../shop/shop.service.js';
 
@@ -97,4 +97,18 @@ export async function setBusinessType(ownerUserId, ownerEmail, { businessType })
 
   const updated = await companyRepository.setBusinessType(company.id, businessType);
   return toResponse(updated);
+}
+
+export async function getBillingHistory(ownerUserId, { limit }) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+
+  // No business_type set yet means no Stripe customer exists (3.1) - nothing
+  // to fetch. Same "empty array, not an error" convention as listMyShops for
+  // a shop-less company. Avoids ever calling Stripe for a company that can't
+  // possibly have invoices yet.
+  if (!company.stripe_customer_id) {
+    return { invoices: [], hasMore: false };
+  }
+
+  return listInvoices({ customerId: company.stripe_customer_id, limit });
 }

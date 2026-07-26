@@ -160,3 +160,68 @@ export function constructWebhookEvent({ rawBody, signature }) {
     throw new AppError('Invalid webhook signature', 400);
   }
 }
+
+/**
+ * Fetches a company's invoice history directly from Stripe rather than our
+ * own stripe_webhook_events table - that table only has what we chose to
+ * record (amount, status, a timestamp). A real invoice number, a page the
+ * owner can actually pay from (hostedInvoiceUrl), and a PDF only exist on
+ * Stripe's side, and 3.6's lockout flow needs exactly that: something
+ * actionable, not just "you owe some amount as of some date."
+ *
+ * Test mode returns a fixed canned pair (one paid, one open) rather than
+ * random data - these tests are checking OUR integration (auth, company
+ * resolution, response shaping), not re-testing Stripe's own list behaviour.
+ */
+export async function listInvoices({ customerId, limit }) {
+  if (config.env.isTest) {
+    return {
+      invoices: [
+        {
+          id: 'in_test_paid_001',
+          number: 'TEST-0001',
+          status: 'paid',
+          amountDue: 2999,
+          amountPaid: 2999,
+          currency: 'gbp',
+          created: new Date('2026-06-01T00:00:00Z').toISOString(),
+          hostedInvoiceUrl: 'https://invoice.stripe.com/test/paid',
+          invoicePdf: 'https://invoice.stripe.com/test/paid.pdf',
+        },
+        {
+          id: 'in_test_open_002',
+          number: 'TEST-0002',
+          status: 'open',
+          amountDue: 2999,
+          amountPaid: 0,
+          currency: 'gbp',
+          created: new Date('2026-07-01T00:00:00Z').toISOString(),
+          hostedInvoiceUrl: 'https://invoice.stripe.com/test/open',
+          invoicePdf: 'https://invoice.stripe.com/test/open.pdf',
+        },
+      ],
+      hasMore: false,
+    };
+  }
+
+  try {
+    const result = await stripe.invoices.list({ customer: customerId, limit });
+    return {
+      invoices: result.data.map((invoice) => ({
+        id: invoice.id,
+        number: invoice.number,
+        status: invoice.status,
+        amountDue: invoice.amount_due,
+        amountPaid: invoice.amount_paid,
+        currency: invoice.currency,
+        created: new Date(invoice.created * 1000).toISOString(),
+        hostedInvoiceUrl: invoice.hosted_invoice_url,
+        invoicePdf: invoice.invoice_pdf,
+      })),
+      hasMore: result.has_more,
+    };
+  } catch (err) {
+    logger.error({ err, customerId }, 'Failed to list Stripe invoices');
+    throw new AppError('Failed to load billing history', 502);
+  }
+}

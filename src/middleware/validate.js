@@ -44,3 +44,24 @@ export function validateParams(schema) {
     next();
   };
 }
+
+/**
+ * Same idea as validateBody/validateParams, but for the query string. First
+ * use is 3.7's ?limit= on billing history.
+ *
+ * Usage:
+ *   router.get('/x', validateQuery(z.object({ limit: z.coerce.number() })), controller);
+ */
+export function validateQuery(schema) {
+  return (req, res, next) => {
+    const result = schema.safeParse(req.query);
+    if (!result.success) {
+      const message = result.error.issues
+        .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+        .join('; ');
+      return next(new AppError(`Invalid query parameters - ${message}`, 400));
+    }
+    req.query = result.data;
+    next();
+  };
+}

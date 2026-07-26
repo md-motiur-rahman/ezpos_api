@@ -286,3 +286,96 @@ test('setting business_type again does not create a second stripe_customer_id', 
 
   assert.equal(first[0].stripe_customer_id, second[0].stripe_customer_id);
 });
+
+// --- GET /api/companies/mine/billing-history (Module 3.7) ---
+
+test('billing-history returns an empty list when the company has no Stripe customer yet', async () => {
+  const userId = await insertUser();
+  await request(app).post('/api/companies').set('Authorization', authHeaderFor(userId)).send(VALID_COMPANY);
+
+  const res = await request(app)
+    .get('/api/companies/mine/billing-history')
+    .set('Authorization', authHeaderFor(userId));
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body, { invoices: [], hasMore: false });
+});
+
+test('billing-history returns invoices once the company has a Stripe customer', async () => {
+  const userId = await insertUser();
+  const header = authHeaderFor(userId);
+  await request(app).post('/api/companies').set('Authorization', header).send(VALID_COMPANY);
+  await request(app)
+    .post('/api/companies/mine/business-type')
+    .set('Authorization', header)
+    .send({ businessType: 'single' });
+
+  const res = await request(app).get('/api/companies/mine/billing-history').set('Authorization', header);
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.invoices.length, 2);
+  assert.equal(res.body.invoices[0].status, 'paid');
+  assert.equal(res.body.invoices[1].status, 'open');
+  assert.equal(res.body.invoices[0].amountDue, 2999);
+  assert.ok(res.body.invoices[0].hostedInvoiceUrl);
+  assert.equal(res.body.hasMore, false);
+});
+
+test('billing-history rejects a limit of 0', async () => {
+  const userId = await insertUser();
+  await request(app).post('/api/companies').set('Authorization', authHeaderFor(userId)).send(VALID_COMPANY);
+
+  const res = await request(app)
+    .get('/api/companies/mine/billing-history?limit=0')
+    .set('Authorization', authHeaderFor(userId));
+
+  assert.equal(res.status, 400);
+});
+
+test('billing-history rejects a limit over 100', async () => {
+  const userId = await insertUser();
+  await request(app).post('/api/companies').set('Authorization', authHeaderFor(userId)).send(VALID_COMPANY);
+
+  const res = await request(app)
+    .get('/api/companies/mine/billing-history?limit=101')
+    .set('Authorization', authHeaderFor(userId));
+
+  assert.equal(res.status, 400);
+});
+
+test('billing-history returns 404 with no active company', async () => {
+  const userId = await insertUser();
+
+  const res = await request(app)
+    .get('/api/companies/mine/billing-history')
+    .set('Authorization', authHeaderFor(userId));
+
+  assert.equal(res.status, 404);
+});
+
+test('billing-history rejects requests with no auth token', async () => {
+  const res = await request(app).get('/api/companies/mine/billing-history');
+
+  assert.equal(res.status, 401);
+});
+
+test('billing-history is accessible even when the company is billing-locked', async () => {
+  const userId = await insertUser();
+  const header = authHeaderFor(userId);
+  await request(app).post('/api/companies').set('Authorization', header).send(VALID_COMPANY);
+  await request(app)
+    .post('/api/companies/mine/business-type')
+    .set('Authorization', header)
+    .send({ businessType: 'single' });
+  await query(
+    `UPDATE companies SET subscription_status = 'past_due',
+            grace_period_ends_at = now() - interval '1 day'
+     WHERE owner_user_id = $1`,
+    [userId]
+  );
+
+  const res = await request(app).get('/api/companies/mine/billing-history').set('Authorization', header);
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.invoices.length, 2);
+});

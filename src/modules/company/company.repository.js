@@ -4,7 +4,7 @@ import { buildUpdateSet } from '../../utils/sql.js';
 const COLUMNS = `id, owner_user_id, name, address_line1, address_line2, city, postcode,
                  country, phone, vat_number, company_number, business_type,
                  stripe_customer_id, stripe_subscription_id, trial_ends_at,
-                 created_at, updated_at`;
+                 subscription_status, created_at, updated_at`;
 
 export async function findActiveCompanyByOwner(ownerUserId) {
   const { rows } = await query(
@@ -96,6 +96,23 @@ export async function setStripeSubscriptionId(companyId, stripeSubscriptionId) {
 export async function setTrialEndsAt(companyId, trialEndsAt) {
   await query(`UPDATE companies SET trial_ends_at = $1, updated_at = now() WHERE id = $2`, [
     trialEndsAt,
+    companyId,
+  ]);
+}
+
+/** Used by webhook handling to map a Stripe customer back to our company. */
+export async function findByStripeCustomerId(stripeCustomerId) {
+  const { rows } = await query(
+    `SELECT ${COLUMNS} FROM companies WHERE stripe_customer_id = $1 AND deleted_at IS NULL`,
+    [stripeCustomerId]
+  );
+  return rows[0] ?? null;
+}
+
+/** Written from Stripe webhooks - mirrors Stripe's own subscription status. */
+export async function setSubscriptionStatus(companyId, subscriptionStatus) {
+  await query(`UPDATE companies SET subscription_status = $1, updated_at = now() WHERE id = $2`, [
+    subscriptionStatus,
     companyId,
   ]);
 }

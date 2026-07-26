@@ -4,7 +4,13 @@ import config from '../config/index.js';
 import { logger } from './logger.js';
 import { AppError } from './AppError.js';
 
-const stripe = config.env.isTest ? null : new Stripe(config.env.stripeSecretKey);
+// The client is constructed in every environment, including tests. Every
+// function that makes a real network call guards on config.env.isTest and
+// returns a fake instead, so nothing reaches Stripe during tests. Webhook
+// signature verification is the exception that needs a real client: it's
+// pure local HMAC with no network call, so tests exercise the genuine
+// cryptographic path rather than a stub.
+const stripe = new Stripe(config.env.stripeSecretKey);
 
 function fakeId(prefix) {
   return `${prefix}_test_${crypto.randomUUID().replace(/-/g, '').slice(0, 14)}`;
@@ -133,5 +139,24 @@ export async function cancelSubscriptionAtPeriodEnd({ subscriptionId }) {
   } catch (err) {
     logger.error({ err, subscriptionId }, 'Failed to cancel Stripe subscription');
     throw new AppError('Failed to update billing for this company', 502);
+  }
+}
+
+/**
+ * Verifies a webhook actually came from Stripe and returns the parsed event.
+ *
+ * Requires the RAW request body - if Express's JSON parser has already turned
+ * it into an object, the signature can never match (see app.js for why the
+ * webhook route is mounted before express.json()).
+ *
+ * A failed check means either a misconfigured secret or a forged request, so
+ * this is a 400 rather than a 502: the caller sent us something invalid.
+ */
+export function constructWebhookEvent({ rawBody, signature }) {
+  try {
+    return stripe.webhooks.constructEvent(rawBody, signature, config.env.stripeWebhookSecret);
+  } catch (err) {
+    logger.warn({ err: err.message }, 'Stripe webhook signature verification failed');
+    throw new AppError('Invalid webhook signature', 400);
   }
 }

@@ -12,6 +12,7 @@ import authRoutes from './modules/auth/auth.routes.js';
 import meRoutes from './modules/auth/me.routes.js';
 import companyRoutes from './modules/company/company.routes.js';
 import shopRoutes from './modules/shop/shop.routes.js';
+import webhookRoutes from './modules/billing/billing.routes.js';
 
 const app = express();
 
@@ -50,9 +51,16 @@ const rateLimiter = rateLimit({
 app.use(helmet());
 app.use(cors(corsOptions));
 app.use(rateLimiter);
+app.use(pinoHttp({ logger })); // structured request logging (method, path, status, duration)
+
+// --- Stripe webhooks ---
+// Mounted BEFORE express.json() deliberately: signature verification needs the
+// raw request body, and a global JSON parser would consume it first. This is
+// the only route in the app with that requirement.
+app.use('/api/webhooks', webhookRoutes);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(pinoHttp({ logger })); // structured request logging (method, path, status, duration)
 
 // --- Health check ---
 // Used to verify the API is up (load balancers, deploy checks, manual testing).

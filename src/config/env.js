@@ -24,6 +24,7 @@ const requiredVars = [
   'STRIPE_SECRET_KEY',
   'STRIPE_SHOP_PRICE_ID',
   'STRIPE_ADDON_HEALTH_SAFETY_PRICE_ID',
+  'STRIPE_WEBHOOK_SECRET',
 ];
 
 function validateEnv() {
@@ -66,4 +67,5 @@ export const env = {
   stripeAddonPriceIds: {
     health_safety: process.env.STRIPE_ADDON_HEALTH_SAFETY_PRICE_ID,
   },
+  stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
 };

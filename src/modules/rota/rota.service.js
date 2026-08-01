@@ -1,6 +1,6 @@
 import { AppError } from '../../utils/AppError.js';
-import { PERMISSIONS, hasEffectivePermission } from '../staff/permissions.js';
-import { resolveActorAuthority } from '../staff/actorAuthority.js';
+import { PERMISSIONS } from '../staff/permissions.js';
+import { resolveActorAuthority, assertHasPermission } from '../staff/actorAuthority.js';
 import * as shopRepository from '../shop/shop.repository.js';
 import * as staffRepository from '../staff/staff.repository.js';
 import * as rotaRepository from './rota.repository.js';
@@ -22,8 +22,11 @@ function toResponse(shift) {
  * scope authority over this shop (404 otherwise, same convention as
  * everywhere else), AND rota is actually enabled for it (400 - a business
  * config gate, same status precedent as 2.3's "set business_type first").
+ *
+ * Exported so swapRequest.service.js (5.2) reuses this exact gate rather
+ * than a near-duplicate - a swap request is fundamentally a rota operation.
  */
-async function requireRotaEnabledScope(actor, shopId) {
+export async function requireRotaEnabledScope(actor, shopId) {
   const authority = await resolveActorAuthority(actor, shopId);
   const shop = await shopRepository.findActiveShopById(shopId);
   if (!shop || !shop.rota_enabled) {
@@ -37,10 +40,8 @@ async function requireRotaEnabledScope(actor, shopId) {
  * required for reads - a Server has an obvious legitimate need to see the
  * rota (to know when they're working).
  */
-function requireManageRota({ role, activeOverridePermissions }) {
-  if (!hasEffectivePermission(role, activeOverridePermissions, PERMISSIONS.MANAGE_ROTA)) {
-    throw new AppError('You do not have permission to manage the rota', 403);
-  }
+function requireManageRota(authority) {
+  assertHasPermission(authority, PERMISSIONS.MANAGE_ROTA, 'You do not have permission to manage the rota');
 }
 
 export async function createShift(actor, shopId, { staffId, startTime, endTime, notes }) {

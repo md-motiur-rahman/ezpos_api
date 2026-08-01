@@ -17,6 +17,7 @@ import webhookRoutes from './modules/billing/billing.routes.js';
 import staffAuthRoutes from './modules/staffAuth/staffAuth.routes.js';
 import staffPermissionRoutes from './modules/staff/staffPermission.routes.js';
 import rotaRoutes from './modules/rota/rota.routes.js';
+import swapRequestRoutes from './modules/rota/swapRequest.routes.js';
 
 const app = express();
 
@@ -101,6 +102,7 @@ app.use('/api/companies', companyRoutes);
 // requireAuth's own error appearing in the stack, not requireStaffOrOwnerAuth's).
 app.use('/api/shops/:shopId/staff', staffRoutes);
 app.use('/api/shops/:shopId/rota-shifts', rotaRoutes);
+app.use('/api/shops/:shopId/swap-requests', swapRequestRoutes);
 app.use('/api/shops', shopRoutes);
 app.use('/api/staff-auth', staffAuthRoutes);
 app.use('/api/staff-permissions', staffPermissionRoutes);

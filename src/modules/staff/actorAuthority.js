@@ -1,5 +1,5 @@
 import { AppError } from '../../utils/AppError.js';
-import { ROLES } from './permissions.js';
+import { ROLES, hasEffectivePermission } from './permissions.js';
 import * as companyRepository from '../company/company.repository.js';
 import * as shopRepository from '../shop/shop.repository.js';
 import * as staffPermissionRepository from './staffPermission.repository.js';
@@ -39,4 +39,18 @@ export async function resolveActorAuthority(actor, shopId) {
     actor.id
   );
   return { role: actor.role, activeOverridePermissions };
+}
+
+/**
+ * Throws a 403 unless the resolved authority has the given permission
+ * (default or override). The same "has permission X, else 403" check was
+ * independently written inline in staffPermission.service.js (4.4),
+ * staff.service.js (4.5), and rota.service.js (5.1) - extracted here once a
+ * 4th module (swapRequest.service.js, 5.2) needed the identical check,
+ * rather than write a 4th near-identical copy.
+ */
+export function assertHasPermission({ role, activeOverridePermissions }, permission, message) {
+  if (!hasEffectivePermission(role, activeOverridePermissions, permission)) {
+    throw new AppError(message, 403);
+  }
 }

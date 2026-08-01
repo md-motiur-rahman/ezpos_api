@@ -15,5 +15,14 @@ test('GET /unknown-route returns a 404 in the standard error shape', async () =>
   const res = await request(app).get('/unknown-route');
 
   assert.equal(res.status, 404);
-  assert.match(res.body.error.message, /Route not found/);
+  assert.match(res.body.error.message, /Route not found: /);
+});
+
+test('malformed JSON in a request body returns 400, not 500', async () => {
+  const res = await request(app)
+    .post('/api/auth/login')
+    .set('Content-Type', 'application/json')
+    .send('{ this is not valid json');
+
+  assert.equal(res.status, 400);
 });

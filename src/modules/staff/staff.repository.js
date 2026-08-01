@@ -27,6 +27,18 @@ export async function listActiveStaffForShop(shopId) {
 }
 
 /**
+ * Unscoped by shop - used when the caller doesn't yet know which shop the
+ * staff member belongs to (Module 4.4's permission endpoints, which resolve
+ * the target first, then check the actor's authority over that target's shop).
+ */
+export async function findActiveStaffById(id) {
+  const { rows } = await query(`SELECT ${COLUMNS} FROM staff WHERE id = $1 AND deleted_at IS NULL`, [
+    id,
+  ]);
+  return rows[0] ?? null;
+}
+
+/**
  * Ownership scoped directly in the WHERE clause, same pattern as shops: a
  * staff member that doesn't exist and one belonging to a different shop both
  * simply come back as null.

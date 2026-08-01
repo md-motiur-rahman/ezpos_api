@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ROLES, PERMISSIONS, ROLE_RANK, roleHasPermission } from '../../src/modules/staff/permissions.js';
+import { ROLES, PERMISSIONS, ROLE_RANK, roleHasPermission, hasEffectivePermission } from '../../src/modules/staff/permissions.js';
 
 // --- Owner bypasses everything ---
 
@@ -84,4 +84,31 @@ test('rank ordering is Owner > Manager > Shift Manager > Server = Chef', () => {
   assert.ok(ROLE_RANK[ROLES.MANAGER] > ROLE_RANK[ROLES.SHIFT_MANAGER]);
   assert.ok(ROLE_RANK[ROLES.SHIFT_MANAGER] > ROLE_RANK[ROLES.SERVER]);
   assert.equal(ROLE_RANK[ROLES.SERVER], ROLE_RANK[ROLES.CHEF]);
+});
+
+// --- hasEffectivePermission (Module 4.4) ---
+
+test('hasEffectivePermission returns true for a role default with no overrides needed', () => {
+  assert.equal(hasEffectivePermission(ROLES.SERVER, [], PERMISSIONS.ACCESS_TILL), true);
+});
+
+test('hasEffectivePermission returns false when neither default nor override grants it', () => {
+  assert.equal(hasEffectivePermission(ROLES.SHIFT_MANAGER, [], PERMISSIONS.MANAGE_INVENTORY), false);
+});
+
+test('hasEffectivePermission returns true when an active override grants it', () => {
+  assert.equal(
+    hasEffectivePermission(ROLES.SHIFT_MANAGER, [PERMISSIONS.MANAGE_INVENTORY], PERMISSIONS.MANAGE_INVENTORY),
+    true
+  );
+});
+
+test('hasEffectivePermission does not let an override strip a default (additive only)', () => {
+  // An override list that happens not to include ACCESS_TILL must not remove
+  // it from a Server, who has it by default regardless of overrides.
+  assert.equal(hasEffectivePermission(ROLES.SERVER, [], PERMISSIONS.ACCESS_TILL), true);
+});
+
+test('Owner has every permission via hasEffectivePermission regardless of overrides list', () => {
+  assert.equal(hasEffectivePermission(ROLES.OWNER, [], PERMISSIONS.MANAGE_STAFF), true);
 });

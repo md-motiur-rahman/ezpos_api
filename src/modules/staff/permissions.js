@@ -100,3 +100,16 @@ export function roleHasPermission(role, permission) {
   const defaults = ROLE_DEFAULT_PERMISSIONS[role];
   return defaults ? defaults.includes(permission) : false;
 }
+
+/**
+ * Whether a role has a permission EITHER by default OR via an active
+ * per-staff override (Module 4.4). Overrides only ADD to the default set -
+ * they can't strip away a role's own defaults for one specific person; that
+ * would be a materially different (deny-list) feature, out of scope here.
+ */
+export function hasEffectivePermission(role, activeOverridePermissions, permission) {
+  if (roleHasPermission(role, permission)) {
+    return true;
+  }
+  return activeOverridePermissions.includes(permission);
+}

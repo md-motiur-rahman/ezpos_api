@@ -10,18 +10,25 @@ import { AppError } from '../utils/AppError.js';
  * Operational errors (AppError - expected: not found, bad input, etc.)
  * are shown to the client as-is, using their own statusCode.
  *
- * Anything else is treated as an unexpected bug: logged in full (message +
- * stack), but the client only ever sees a generic 500 message - never
- * internal details, even in development, to keep this predictable to build
- * against from day one.
+ * body-parser/Express set `expose: true` plus a 4xx `statusCode` on their own
+ * errors (e.g. malformed JSON) specifically to mark them safe to show the
+ * client - respected here the same way AppError is, so a client sending
+ * broken JSON gets a proper 400 with body-parser's own message, not a
+ * generic 500. Anything else is treated as an unexpected bug: logged in
+ * full (message + stack), but the client only ever sees a generic 500
+ * message - never internal details, even in development, to keep this
+ * predictable to build against from day one.
  */
 export function errorHandler(err, req, res, next) {
-  const isOperational = err.isOperational === true;
-  const statusCode = isOperational ? err.statusCode : 500;
-  const message = isOperational ? err.message : 'Internal server error';
+  const isSafeToExpose =
+    err.isOperational === true ||
+    (err.expose === true && Number.isInteger(err.statusCode) && err.statusCode >= 400 && err.statusCode < 500);
+
+  const statusCode = isSafeToExpose ? err.statusCode : 500;
+  const message = isSafeToExpose ? err.message : 'Internal server error';
 
   const logPayload = { err, statusCode, path: req.originalUrl, method: req.method };
-  if (isOperational) {
+  if (isSafeToExpose) {
     logger.warn(logPayload, message);
   } else {
     logger.error(logPayload, err.message || 'Unexpected error');

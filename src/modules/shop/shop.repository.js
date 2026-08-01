@@ -13,6 +13,19 @@ export async function countActiveShopsForCompany(companyId) {
   return rows[0].count;
 }
 
+/**
+ * Unscoped by company - used when the caller has already confirmed authority
+ * over this shop some other way (e.g. rota.service.js, after
+ * resolveActorAuthority) and just needs the shop's own fields, like
+ * rota_enabled.
+ */
+export async function findActiveShopById(id) {
+  const { rows } = await query(`SELECT ${COLUMNS} FROM shops WHERE id = $1 AND deleted_at IS NULL`, [
+    id,
+  ]);
+  return rows[0] ?? null;
+}
+
 export async function createShop(companyId, data) {
   const { rows } = await query(
     `INSERT INTO shops

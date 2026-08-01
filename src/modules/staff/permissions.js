@@ -57,7 +57,7 @@ export const ROLE_DEFAULT_PERMISSIONS = Object.freeze({
   [ROLES.OWNER]: Object.freeze(Object.values(PERMISSIONS)),
 
   // "manage inventory, add staff, create Shift Managers, use till, perform
-  // H&S" + grants permissions to others by default.
+  // H&S, manage rota" + grants permissions to others by default.
   [ROLES.MANAGER]: Object.freeze([
     PERMISSIONS.VIEW_INVENTORY,
     PERMISSIONS.MANAGE_INVENTORY,
@@ -66,10 +66,12 @@ export const ROLE_DEFAULT_PERMISSIONS = Object.freeze({
     PERMISSIONS.ACCESS_TILL,
     PERMISSIONS.PERFORM_HEALTH_SAFETY,
     PERMISSIONS.GRANT_PERMISSIONS,
+    PERMISSIONS.MANAGE_ROTA,
   ]),
 
-  // Manager-level abilities are earned only via 4.4's override system, never
-  // granted by default just for holding this role.
+  // Manager-level abilities (including manage_rota - Module 5.1) are earned
+  // only via 4.4's override system, never granted by default just for
+  // holding this role.
   [ROLES.SHIFT_MANAGER]: Object.freeze([
     PERMISSIONS.ACCESS_TILL,
     PERMISSIONS.PERFORM_HEALTH_SAFETY,

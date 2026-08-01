@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
 import bcrypt from 'bcrypt';
 import { AppError } from '../../utils/AppError.js';
-import { getMyShopOrThrow } from '../shop/shop.service.js';
+import { ROLE_RANK, PERMISSIONS, hasEffectivePermission } from './permissions.js';
+import { resolveActorAuthority } from './actorAuthority.js';
 import * as staffRepository from './staff.repository.js';
 
 const PIN_SALT_ROUNDS = 12;
@@ -28,8 +29,29 @@ function toResponse(staff) {
   };
 }
 
-export async function createStaffForShop(ownerUserId, shopId, { fullName, role }) {
-  const shop = await getMyShopOrThrow(ownerUserId, shopId);
+/**
+ * The single rule that reproduces the whole spec: a staff member can only
+ * manage someone STRICTLY below their own rank. "Manager cannot create
+ * another Manager" falls out of this automatically (equal rank fails the
+ * strict inequality) - no special-casing needed. Self-management is
+ * likewise blocked for free: nobody outranks themselves.
+ */
+function assertOutranks(actorRole, targetRole, actionVerb) {
+  if (ROLE_RANK[actorRole] <= ROLE_RANK[targetRole]) {
+    throw new AppError(`You cannot ${actionVerb} a staff member at your rank or above`, 403);
+  }
+}
+
+export async function createStaffForShop(actor, shopId, { fullName, role }) {
+  const { role: actorRole, activeOverridePermissions: actorOverrides } = await resolveActorAuthority(
+    actor,
+    shopId
+  );
+
+  if (!hasEffectivePermission(actorRole, actorOverrides, PERMISSIONS.MANAGE_STAFF)) {
+    throw new AppError('You do not have permission to manage staff', 403);
+  }
+  assertOutranks(actorRole, role, 'create');
 
   const rawPin = generateEightDigitCode();
   const pinHash = await bcrypt.hash(rawPin, PIN_SALT_ROUNDS);
@@ -38,7 +60,7 @@ export async function createStaffForShop(ownerUserId, shopId, { fullName, role }
   for (let attempt = 1; ; attempt += 1) {
     const staffIdCode = generateEightDigitCode();
     try {
-      staff = await staffRepository.createStaff(shop.id, {
+      staff = await staffRepository.createStaff(shopId, {
         fullName,
         role,
         staffIdCode,
@@ -66,36 +88,70 @@ export async function createStaffForShop(ownerUserId, shopId, { fullName, role }
   };
 }
 
-export async function listStaffForShop(ownerUserId, shopId) {
-  const shop = await getMyShopOrThrow(ownerUserId, shopId);
-  const staff = await staffRepository.listActiveStaffForShop(shop.id);
+export async function listStaffForShop(actor, shopId) {
+  await resolveActorAuthority(actor, shopId); // scope check only - reads stay open
+  const staff = await staffRepository.listActiveStaffForShop(shopId);
   return staff.map(toResponse);
 }
 
-async function getStaffOrThrow(ownerUserId, shopId, staffId) {
-  const shop = await getMyShopOrThrow(ownerUserId, shopId);
-  const staff = await staffRepository.findActiveStaffByIdForShop(staffId, shop.id);
+async function getTargetStaffInScope(actor, shopId, staffId) {
+  await resolveActorAuthority(actor, shopId); // scope check only - reads stay open
+  const staff = await staffRepository.findActiveStaffByIdForShop(staffId, shopId);
   if (!staff) {
     throw new AppError('Staff member not found', 404);
   }
   return staff;
 }
 
-export async function getStaffMember(ownerUserId, shopId, staffId) {
-  const staff = await getStaffOrThrow(ownerUserId, shopId, staffId);
+export async function getStaffMember(actor, shopId, staffId) {
+  const staff = await getTargetStaffInScope(actor, shopId, staffId);
   return toResponse(staff);
 }
 
-export async function updateStaffMember(ownerUserId, shopId, staffId, data) {
-  await getStaffOrThrow(ownerUserId, shopId, staffId);
-  const updated = await staffRepository.updateStaff(staffId, data);
+export async function updateStaffMember(actor, shopId, staffId, data) {
+  const { role: actorRole, activeOverridePermissions: actorOverrides } = await resolveActorAuthority(
+    actor,
+    shopId
+  );
+  const targetStaff = await staffRepository.findActiveStaffByIdForShop(staffId, shopId);
+  if (!targetStaff) {
+    throw new AppError('Staff member not found', 404);
+  }
+
+  if (!hasEffectivePermission(actorRole, actorOverrides, PERMISSIONS.MANAGE_STAFF)) {
+    throw new AppError('You do not have permission to manage staff', 403);
+  }
+  assertOutranks(actorRole, targetStaff.role, 'update');
+  // Changing role is itself bound by the same ceiling - promoting someone to
+  // the actor's own rank or above via an edit is blocked the same way
+  // creating them at that rank would be.
+  if (data.role) {
+    assertOutranks(actorRole, data.role, 'promote a staff member to');
+  }
+
+  const updated = await staffRepository.updateStaff(targetStaff.id, data);
   return toResponse(updated);
 }
 
-export async function deactivateStaffMember(ownerUserId, shopId, staffId) {
-  const staff = await getStaffOrThrow(ownerUserId, shopId, staffId);
-  await staffRepository.softDeleteStaff(staff.id);
-  // NOTE (Module 4.3 dependency): once staff PIN sessions exist, deactivating
-  // a staff member should also invalidate any active session. No session
-  // concept exists yet to hook into.
+export async function deactivateStaffMember(actor, shopId, staffId) {
+  const { role: actorRole, activeOverridePermissions: actorOverrides } = await resolveActorAuthority(
+    actor,
+    shopId
+  );
+  const targetStaff = await staffRepository.findActiveStaffByIdForShop(staffId, shopId);
+  if (!targetStaff) {
+    throw new AppError('Staff member not found', 404);
+  }
+
+  if (!hasEffectivePermission(actorRole, actorOverrides, PERMISSIONS.MANAGE_STAFF)) {
+    throw new AppError('You do not have permission to manage staff', 403);
+  }
+  // Self-deactivation is blocked for free here: an actor's own rank can
+  // never be strictly greater than their own rank.
+  assertOutranks(actorRole, targetStaff.role, 'deactivate');
+
+  await staffRepository.softDeleteStaff(targetStaff.id);
+  // Any active session for this staff member is invalidated automatically on
+  // their next request - requireStaffAuth's session lookup (4.3) requires
+  // staff.deleted_at IS NULL, no explicit revocation needed here.
 }

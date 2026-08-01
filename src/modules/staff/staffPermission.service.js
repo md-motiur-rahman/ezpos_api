@@ -1,8 +1,7 @@
 import { AppError } from '../../utils/AppError.js';
-import { ROLES, ROLE_RANK, PERMISSIONS, hasEffectivePermission } from './permissions.js';
+import { PERMISSIONS, ROLE_RANK, hasEffectivePermission } from './permissions.js';
+import { resolveActorAuthority } from './actorAuthority.js';
 import * as staffRepository from './staff.repository.js';
-import * as companyRepository from '../company/company.repository.js';
-import * as shopRepository from '../shop/shop.repository.js';
 import * as staffPermissionRepository from './staffPermission.repository.js';
 
 const POSTGRES_UNIQUE_VIOLATION = '23505';
@@ -23,38 +22,6 @@ async function getTargetStaffOrThrow(staffId) {
     throw new AppError('Staff member not found', 404);
   }
   return staff;
-}
-
-/**
- * Resolves the calling actor's role + active overrides for authorization
- * purposes, after confirming they actually have authority over the target's
- * shop at all - not found/out of scope both simply 404, same convention as
- * every other ownership check in this project.
- *
- * The Owner is treated uniformly as ROLES.OWNER with no overrides needed:
- * roleHasPermission's Owner bypass (4.1) already makes every subsequent
- * check pass for them without special-casing anything below this point.
- */
-async function resolveActorAuthority(actor, targetShopId) {
-  if (actor.type === 'owner') {
-    const company = await companyRepository.findActiveCompanyByOwner(actor.id);
-    const shop = company
-      ? await shopRepository.findActiveShopByIdForCompany(targetShopId, company.id)
-      : null;
-    if (!shop) {
-      throw new AppError('Staff member not found', 404);
-    }
-    return { role: ROLES.OWNER, activeOverridePermissions: [] };
-  }
-
-  // actor.type === 'staff' - can only manage staff within their own shop.
-  if (actor.shopId !== targetShopId) {
-    throw new AppError('Staff member not found', 404);
-  }
-  const activeOverridePermissions = await staffPermissionRepository.listActivePermissionsForStaff(
-    actor.id
-  );
-  return { role: actor.role, activeOverridePermissions };
 }
 
 export async function grantPermission(actor, targetStaffId, permission) {

@@ -12,6 +12,7 @@ import authRoutes from './modules/auth/auth.routes.js';
 import meRoutes from './modules/auth/me.routes.js';
 import companyRoutes from './modules/company/company.routes.js';
 import shopRoutes from './modules/shop/shop.routes.js';
+import staffRoutes from './modules/staff/staff.routes.js';
 import webhookRoutes from './modules/billing/billing.routes.js';
 import staffAuthRoutes from './modules/staffAuth/staffAuth.routes.js';
 import staffPermissionRoutes from './modules/staff/staffPermission.routes.js';
@@ -89,6 +90,15 @@ app.get('/health', async (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/me', meRoutes);
 app.use('/api/companies', companyRoutes);
+// Independent mount (Module 4.5), registered BEFORE the broader /api/shops
+// mount below - deliberately, and load-bearing. Express tries app.use()
+// prefixes in registration order; /api/shops is a PREFIX of
+// /api/shops/:shopId/staff, so if it were registered first it would swallow
+// every staff request into shopRoutes' owner-only requireAuth before this
+// router ever got a chance to run. Verified this ordering empirically after
+// the reverse order caused every staff-session request to 401 (confirmed via
+// requireAuth's own error appearing in the stack, not requireStaffOrOwnerAuth's).
+app.use('/api/shops/:shopId/staff', staffRoutes);
 app.use('/api/shops', shopRoutes);
 app.use('/api/staff-auth', staffAuthRoutes);
 app.use('/api/staff-permissions', staffPermissionRoutes);

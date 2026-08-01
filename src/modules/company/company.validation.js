@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { limitQuerySchema } from '../../utils/commonSchemas.js';
 
 export const createCompanySchema = z.object({
   name: z.string().trim().min(1, 'Company name is required'),
@@ -18,6 +19,4 @@ export const businessTypeSchema = z.object({
   businessType: z.enum(['single', 'chain']),
 });
 
-export const billingHistoryQuerySchema = z.object({
-  limit: z.coerce.number().int().min(1).max(100).default(10),
-});
+export const billingHistoryQuerySchema = limitQuerySchema;

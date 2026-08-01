@@ -123,6 +123,10 @@ test('the Owner can grant any permission to any staff member', async () => {
 
   assert.equal(res.status, 201);
   assert.deepEqual(await activeOverrides(target.id), ['manage_inventory']);
+  // Correct attribution for an Owner-initiated grant (Module 4.6) - prior to
+  // this, an Owner grant recorded no actor at all.
+  assert.equal(res.body.grantedByType, 'owner');
+  assert.equal(res.body.grantedById, ownerUserId);
 });
 
 test('the Owner can revoke any permission from any staff member', async () => {
@@ -173,7 +177,8 @@ test('a Manager can grant a permission they hold to a Shift Manager', async () =
     .send({ permission: 'manage_inventory' });
 
   assert.equal(res.status, 201);
-  assert.equal(res.body.grantedBy, manager.id);
+  assert.equal(res.body.grantedByType, 'staff');
+  assert.equal(res.body.grantedById, manager.id);
 });
 
 test('a Manager cannot grant a permission they do not hold themselves', async () => {

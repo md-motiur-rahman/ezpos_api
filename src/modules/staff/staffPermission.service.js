@@ -11,8 +11,23 @@ function toResponse(override) {
     id: override.id,
     staffId: override.staff_id,
     permission: override.permission,
-    grantedBy: override.granted_by,
+    grantedByType: override.granted_by_type,
+    grantedById: override.granted_by_id,
     createdAt: override.created_at,
+  };
+}
+
+function toAuditLogEntry(row) {
+  return {
+    id: row.id,
+    staffId: row.staff_id,
+    permission: row.permission,
+    grantedByType: row.granted_by_type,
+    grantedById: row.granted_by_id,
+    grantedAt: row.created_at,
+    revokedByType: row.revoked_by_type,
+    revokedById: row.revoked_by_id,
+    revokedAt: row.revoked_at,
   };
 }
 
@@ -44,7 +59,8 @@ export async function grantPermission(actor, targetStaffId, permission) {
     override = await staffPermissionRepository.createOverride(
       targetStaff.id,
       permission,
-      actor.type === 'staff' ? actor.id : null
+      actor.type,
+      actor.id
     );
   } catch (err) {
     if (err.code === POSTGRES_UNIQUE_VIOLATION) {
@@ -72,7 +88,7 @@ export async function revokePermission(actor, targetStaffId, permission) {
   if (!existing) {
     throw new AppError('That permission is not currently granted to this staff member', 404);
   }
-  await staffPermissionRepository.revokeOverride(existing.id);
+  await staffPermissionRepository.revokeOverride(existing.id, actor.type, actor.id);
 }
 
 /**
@@ -92,4 +108,24 @@ export async function listEffectivePermissions(actor, targetStaffId) {
   );
 
   return { staffId: targetStaff.id, role: targetStaff.role, permissions };
+}
+
+/**
+ * Requires grant_permissions - the same gate as actually performing a
+ * grant/revoke, on the reasoning that whoever can act should be able to
+ * audit. Scoped directly to a shop (not derived from a target staff member -
+ * there isn't one single target for a shop-wide history).
+ */
+export async function listAuditLog(actor, shopId, limit) {
+  const { role: actorRole, activeOverridePermissions: actorOverrides } = await resolveActorAuthority(
+    actor,
+    shopId
+  );
+
+  if (!hasEffectivePermission(actorRole, actorOverrides, PERMISSIONS.GRANT_PERMISSIONS)) {
+    throw new AppError('You do not have permission to view the permission audit log', 403);
+  }
+
+  const rows = await staffPermissionRepository.listAuditLogForShop(shopId, limit);
+  return rows.map(toAuditLogEntry);
 }

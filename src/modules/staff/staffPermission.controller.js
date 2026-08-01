@@ -19,3 +19,8 @@ export const revokePermission = asyncHandler(async (req, res) => {
   await staffPermissionService.revokePermission(req.actor, req.params.staffId, req.params.permission);
   res.status(200).json({ message: 'Permission revoked.' });
 });
+
+export const listAuditLog = asyncHandler(async (req, res) => {
+  const log = await staffPermissionService.listAuditLog(req.actor, req.params.shopId, req.query.limit);
+  res.status(200).json(log);
+});

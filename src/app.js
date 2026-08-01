@@ -13,6 +13,7 @@ import meRoutes from './modules/auth/me.routes.js';
 import companyRoutes from './modules/company/company.routes.js';
 import shopRoutes from './modules/shop/shop.routes.js';
 import webhookRoutes from './modules/billing/billing.routes.js';
+import staffAuthRoutes from './modules/staffAuth/staffAuth.routes.js';
 
 const app = express();
 
@@ -88,6 +89,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/me', meRoutes);
 app.use('/api/companies', companyRoutes);
 app.use('/api/shops', shopRoutes);
+app.use('/api/staff-auth', staffAuthRoutes);
 // e.g. app.use('/api/staff', staffRoutes); <- Module 4
 
 app.use(notFoundHandler);

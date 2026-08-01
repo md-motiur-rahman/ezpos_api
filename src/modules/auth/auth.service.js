@@ -8,6 +8,13 @@ import { signAccessToken } from '../../utils/jwt.js';
 import * as authRepository from './auth.repository.js';
 import { verificationEmail, passwordResetEmail, emailChangeConfirmation, emailChangeRequestedNotice } from './auth.emailTemplates.js';
 
+import { generateToken } from '../../utils/token.js';
+// ...
+// generateToken (raw+hash pair) now lives in ../../utils/token.js, shared
+// with staffAuth.service.js (Module 4.3) - re-exported here so existing
+// imports of it from this module keep working unchanged.
+export { generateToken };
+
 const BCRYPT_SALT_ROUNDS = 12;
 const EMAIL_VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const PASSWORD_RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -23,16 +30,6 @@ function comparePassword(password, hash) {
   return bcrypt.compare(password, hash);
 }
 
-/**
- * Generates a high-entropy random token. The raw value is what goes out in
- * the email link (and is never stored); the hash is what we persist, so a
- * leaked database never exposes usable tokens.
- */
-export function generateToken() {
-  const raw = crypto.randomBytes(32).toString('hex');
-  const hash = crypto.createHash('sha256').update(raw).digest('hex');
-  return { raw, hash };
-}
 
 /**
  * Shared by both email verification and password reset: generate a token,

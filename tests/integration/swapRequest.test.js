@@ -109,6 +109,11 @@ test('the shift owner can self-service request a swap without manage_rota', asyn
     .set('Authorization', serverHeader)
     .send({ shiftId, toStaffId: colleague.id });
 
+  console.log('shiftId was:', shiftId);
+  console.log('response body:', res.body);
+
+  assert.equal(res.status, 201);
+
   assert.equal(res.status, 201);
   assert.equal(res.body.status, 'pending');
   assert.equal(res.body.fromStaffId, server.id);

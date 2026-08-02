@@ -24,3 +24,12 @@ export const menuItemIdParamSchema = z.object({
   shopId: z.string().uuid('Invalid shop id'),
   menuItemId: z.string().uuid('Invalid menu item id'),
 });
+
+// variantOverrideSchema is intentionally just overrideSchema reused - same
+// { isEnabled?, priceOverride? } shape, one level down.
+export const variantOverrideSchema = overrideSchema;
+
+export const variantIdParamSchema = z.object({
+  shopId: z.string().uuid('Invalid shop id'),
+  variantId: z.string().uuid('Invalid variant id'),
+});

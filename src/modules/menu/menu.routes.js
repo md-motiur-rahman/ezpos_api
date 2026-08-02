@@ -9,6 +9,9 @@ import {
   updateItemSchema,
   itemIdParamSchema,
   itemListQuerySchema,
+  createVariantSchema,
+  updateVariantSchema,
+  variantIdParamSchema,
 } from './menu.validation.js';
 
 /**
@@ -20,10 +23,9 @@ import {
  * from 4.5/5.x simply don't apply here. requireAuth is already applied by
  * the parent company router.
  *
- * Verified empirically (isolated Express reproduction, independent of this
- * comment) that nesting this at '/mine' doesn't collide with
- * company.routes.js's own exact '/mine' routes - use() is prefix-based,
- * get()/patch()/delete() are exact-match, no overlap.
+ * Verified empirically that nesting this at '/mine' doesn't collide with
+ * company.routes.js's own exact '/mine' routes (GET/PATCH/DELETE) - use()
+ * is prefix-based, get()/patch() are exact-match, no overlap.
  */
 const router = Router();
 
@@ -51,5 +53,30 @@ router.patch(
   menuController.updateItem
 );
 router.delete('/menu-items/:itemId', validateParams(itemIdParamSchema), menuController.deleteItem);
+
+// --- Variants (6.3) ---
+
+router.post(
+  '/menu-items/:itemId/variants',
+  validateParams(itemIdParamSchema),
+  validateBody(createVariantSchema),
+  menuController.createVariant
+);
+router.get(
+  '/menu-items/:itemId/variants',
+  validateParams(itemIdParamSchema),
+  menuController.listVariants
+);
+router.patch(
+  '/menu-items/:itemId/variants/:variantId',
+  validateParams(variantIdParamSchema),
+  validateBody(updateVariantSchema),
+  menuController.updateVariant
+);
+router.delete(
+  '/menu-items/:itemId/variants/:variantId',
+  validateParams(variantIdParamSchema),
+  menuController.deleteVariant
+);
 
 export default router;

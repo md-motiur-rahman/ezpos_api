@@ -128,3 +128,72 @@ export async function updateItem(id, data) {
 export async function softDeleteItem(id) {
   await query(`UPDATE menu_items SET deleted_at = now(), updated_at = now() WHERE id = $1`, [id]);
 }
+
+// --- Variants (6.3) ---
+
+const VARIANT_COLUMNS = `id, menu_item_id, name, price, display_order, created_at, updated_at`;
+
+export async function createVariant(menuItemId, { name, price, displayOrder }) {
+  const { rows } = await query(
+    `INSERT INTO menu_item_variants (menu_item_id, name, price, display_order)
+     VALUES ($1, $2, $3, $4)
+     RETURNING ${VARIANT_COLUMNS}`,
+    [menuItemId, name, price, displayOrder ?? 0]
+  );
+  return rows[0];
+}
+
+export async function listActiveVariantsForItem(menuItemId) {
+  const { rows } = await query(
+    `SELECT ${VARIANT_COLUMNS} FROM menu_item_variants
+     WHERE menu_item_id = $1 AND deleted_at IS NULL
+     ORDER BY display_order, name`,
+    [menuItemId]
+  );
+  return rows;
+}
+
+export async function findActiveVariantByIdForItem(id, menuItemId) {
+  const { rows } = await query(
+    `SELECT ${VARIANT_COLUMNS} FROM menu_item_variants
+     WHERE id = $1 AND menu_item_id = $2 AND deleted_at IS NULL`,
+    [id, menuItemId]
+  );
+  return rows[0] ?? null;
+}
+
+/**
+ * Company-scoped lookup (via JOIN menu_items -> menu_categories), same
+ * pattern as findActiveItemByIdForCompany - used by shopMenu.service.js
+ * (6.2/6.3) to confirm a variant belongs to the shop's own company before
+ * allowing an override.
+ */
+export async function findActiveVariantByIdForCompany(id, companyId) {
+  const { rows } = await query(
+    `SELECT miv.id, miv.menu_item_id, miv.name, miv.price, miv.display_order,
+            miv.created_at, miv.updated_at
+     FROM menu_item_variants miv
+     JOIN menu_items mi ON mi.id = miv.menu_item_id AND mi.deleted_at IS NULL
+     JOIN menu_categories mc ON mc.id = mi.category_id AND mc.deleted_at IS NULL
+     WHERE miv.id = $1 AND mc.company_id = $2 AND miv.deleted_at IS NULL`,
+    [id, companyId]
+  );
+  return rows[0] ?? null;
+}
+
+export async function updateVariant(id, data) {
+  const fieldMap = { name: 'name', price: 'price', displayOrder: 'display_order' };
+  const { clause, values } = buildUpdateSet(fieldMap, data);
+  values.push(id);
+  const { rows } = await query(
+    `UPDATE menu_item_variants SET ${clause} WHERE id = $${values.length} RETURNING ${VARIANT_COLUMNS}`,
+    values
+  );
+  return rows[0];
+}
+
+export async function softDeleteVariant(id) {
+  await query(`UPDATE menu_item_variants SET deleted_at = now(), updated_at = now() WHERE id = $1`, [
+    id,
+  ]);
+}

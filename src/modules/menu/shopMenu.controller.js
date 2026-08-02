@@ -21,6 +21,21 @@ export const clearOverride = asyncHandler(async (req, res) => {
   res.status(200).json({ message: 'Override cleared - reverted to master defaults.' });
 });
 
+export const setVariantOverride = asyncHandler(async (req, res) => {
+  const override = await shopMenuService.setVariantOverride(
+    req.actor,
+    req.params.shopId,
+    req.params.variantId,
+    req.body
+  );
+  res.status(200).json(override);
+});
+
+export const clearVariantOverride = asyncHandler(async (req, res) => {
+  await shopMenuService.clearVariantOverride(req.actor, req.params.shopId, req.params.variantId);
+  res.status(200).json({ message: 'Variant override cleared - reverted to master defaults.' });
+});
+
 export const createLocalItem = asyncHandler(async (req, res) => {
   const item = await shopMenuService.createLocalItem(req.actor, req.params.shopId, req.body);
   res.status(201).json(item);

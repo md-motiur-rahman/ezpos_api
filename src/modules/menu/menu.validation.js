@@ -38,3 +38,22 @@ export const itemIdParamSchema = z.object({
 export const itemListQuerySchema = z.object({
   categoryId: z.string().uuid('Invalid category id').optional(),
 });
+
+// --- Variants (6.3) ---
+
+export const createVariantSchema = z.object({
+  name: z.string().trim().min(1, 'Variant name is required'),
+  price: z.number().positive('Price must be greater than 0'),
+  displayOrder: z.number().int().optional(),
+});
+
+export const updateVariantSchema = z.object({
+  name: z.string().trim().min(1, 'Variant name is required').optional(),
+  price: z.number().positive('Price must be greater than 0').optional(),
+  displayOrder: z.number().int().optional(),
+});
+
+export const variantIdParamSchema = z.object({
+  itemId: z.string().uuid('Invalid item id'),
+  variantId: z.string().uuid('Invalid variant id'),
+});

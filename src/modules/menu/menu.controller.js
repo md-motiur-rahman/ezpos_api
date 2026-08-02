@@ -45,3 +45,30 @@ export const deleteItem = asyncHandler(async (req, res) => {
   await menuService.deleteItem(req.user.id, req.params.itemId);
   res.status(200).json({ message: 'Menu item deleted.' });
 });
+
+// --- Variants (6.3) ---
+
+export const createVariant = asyncHandler(async (req, res) => {
+  const variant = await menuService.createVariant(req.user.id, req.params.itemId, req.body);
+  res.status(201).json(variant);
+});
+
+export const listVariants = asyncHandler(async (req, res) => {
+  const variants = await menuService.listVariants(req.user.id, req.params.itemId);
+  res.status(200).json(variants);
+});
+
+export const updateVariant = asyncHandler(async (req, res) => {
+  const variant = await menuService.updateVariant(
+    req.user.id,
+    req.params.itemId,
+    req.params.variantId,
+    req.body
+  );
+  res.status(200).json(variant);
+});
+
+export const deleteVariant = asyncHandler(async (req, res) => {
+  await menuService.deleteVariant(req.user.id, req.params.itemId, req.params.variantId);
+  res.status(200).json({ message: 'Variant deleted.' });
+});

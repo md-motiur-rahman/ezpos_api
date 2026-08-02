@@ -136,3 +136,58 @@ export async function deleteItem(ownerUserId, itemId) {
   const item = await getItemOrThrow(company.id, itemId);
   await menuRepository.softDeleteItem(item.id);
 }
+
+// --- Variants (6.3) ---
+
+function toVariantResponse(variant) {
+  return {
+    id: variant.id,
+    menuItemId: variant.menu_item_id,
+    name: variant.name,
+    price: Number(variant.price),
+    displayOrder: variant.display_order,
+    createdAt: variant.created_at,
+    updatedAt: variant.updated_at,
+  };
+}
+
+export async function createVariant(ownerUserId, itemId, data) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getItemOrThrow(company.id, itemId); // confirms the item is real and this owner's
+
+  const variant = await menuRepository.createVariant(itemId, data);
+  return toVariantResponse(variant);
+}
+
+export async function listVariants(ownerUserId, itemId) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getItemOrThrow(company.id, itemId);
+
+  const variants = await menuRepository.listActiveVariantsForItem(itemId);
+  return variants.map(toVariantResponse);
+}
+
+async function getVariantOrThrow(itemId, variantId) {
+  const variant = await menuRepository.findActiveVariantByIdForItem(variantId, itemId);
+  if (!variant) {
+    throw new AppError('Variant not found', 404);
+  }
+  return variant;
+}
+
+export async function updateVariant(ownerUserId, itemId, variantId, data) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getItemOrThrow(company.id, itemId);
+  await getVariantOrThrow(itemId, variantId);
+
+  const updated = await menuRepository.updateVariant(variantId, data);
+  return toVariantResponse(updated);
+}
+
+export async function deleteVariant(ownerUserId, itemId, variantId) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getItemOrThrow(company.id, itemId);
+  const variant = await getVariantOrThrow(itemId, variantId);
+
+  await menuRepository.softDeleteVariant(variant.id);
+}

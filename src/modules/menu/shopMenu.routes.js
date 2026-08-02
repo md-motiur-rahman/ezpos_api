@@ -8,6 +8,8 @@ import {
   localItemIdParamSchema,
   overrideSchema,
   menuItemIdParamSchema,
+  variantOverrideSchema,
+  variantIdParamSchema,
 } from './shopMenu.validation.js';
 import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
 
@@ -42,6 +44,20 @@ router.delete(
   '/overrides/:menuItemId',
   validateParams(menuItemIdParamSchema),
   shopMenuController.clearOverride
+);
+
+// Variant overrides (6.3) - one level down from item overrides, same shape,
+// distinct static prefix so there's no ambiguity with /overrides/:menuItemId.
+router.patch(
+  '/variants/:variantId',
+  validateParams(variantIdParamSchema),
+  validateBody(variantOverrideSchema),
+  shopMenuController.setVariantOverride
+);
+router.delete(
+  '/variants/:variantId',
+  validateParams(variantIdParamSchema),
+  shopMenuController.clearVariantOverride
 );
 
 router.post(

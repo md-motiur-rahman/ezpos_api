@@ -110,3 +110,54 @@ export async function updateLocalItem(id, data) {
 export async function softDeleteLocalItem(id) {
   await query(`UPDATE shop_menu_items SET deleted_at = now(), updated_at = now() WHERE id = $1`, [id]);
 }
+
+// --- Variant overrides (6.3) ---
+
+const VARIANT_OVERRIDE_COLUMNS = `id, shop_id, variant_id, is_enabled, price_override, created_at, updated_at`;
+
+/** Same native-upsert reasoning as upsertOverride above - just one level down, on variants. */
+export async function upsertVariantOverride(shopId, variantId, { isEnabled, priceOverride }) {
+  const { rows } = await query(
+    `INSERT INTO shop_menu_variant_overrides (shop_id, variant_id, is_enabled, price_override)
+     VALUES ($1, $2, COALESCE($3, true), $4)
+     ON CONFLICT (shop_id, variant_id) DO UPDATE
+       SET is_enabled = COALESCE($3, shop_menu_variant_overrides.is_enabled),
+           price_override = COALESCE($4, shop_menu_variant_overrides.price_override),
+           updated_at = now()
+     RETURNING ${VARIANT_OVERRIDE_COLUMNS}`,
+    [shopId, variantId, isEnabled ?? null, priceOverride ?? null]
+  );
+  return rows[0];
+}
+
+export async function deleteVariantOverride(shopId, variantId) {
+  await query(`DELETE FROM shop_menu_variant_overrides WHERE shop_id = $1 AND variant_id = $2`, [
+    shopId,
+    variantId,
+  ]);
+}
+
+/**
+ * Every active variant across every master item for the company, resolved
+ * against this shop's overrides - same LEFT JOIN + COALESCE shape as
+ * listResolvedMasterItemsForShop, one level down. Returned flat (tagged with
+ * menu_item_id) rather than pre-grouped - the service layer groups these
+ * onto their parent items, since that's a response-shaping concern, not a
+ * data-fetching one.
+ */
+export async function listResolvedVariantsForShop(shopId, companyId) {
+  const { rows } = await query(
+    `SELECT miv.id, miv.menu_item_id, miv.name, miv.display_order,
+            miv.price AS master_price,
+            COALESCE(smvo.price_override, miv.price) AS effective_price,
+            COALESCE(smvo.is_enabled, true) AS is_enabled
+     FROM menu_item_variants miv
+     JOIN menu_items mi ON mi.id = miv.menu_item_id AND mi.deleted_at IS NULL
+     JOIN menu_categories mc ON mc.id = mi.category_id AND mc.deleted_at IS NULL
+     LEFT JOIN shop_menu_variant_overrides smvo ON smvo.variant_id = miv.id AND smvo.shop_id = $1
+     WHERE mc.company_id = $2 AND miv.deleted_at IS NULL
+     ORDER BY miv.menu_item_id, miv.display_order, miv.name`,
+    [shopId, companyId]
+  );
+  return rows;
+}

@@ -19,6 +19,7 @@ import staffPermissionRoutes from './modules/staff/staffPermission.routes.js';
 import rotaRoutes from './modules/rota/rota.routes.js';
 import swapRequestRoutes from './modules/rota/swapRequest.routes.js';
 import attendanceRoutes from './modules/rota/attendance.routes.js';
+import shopMenuRoutes from './modules/menu/shopMenu.routes.js';
 
 const app = express();
 
@@ -105,6 +106,7 @@ app.use('/api/shops/:shopId/staff', staffRoutes);
 app.use('/api/shops/:shopId/rota-shifts', rotaRoutes);
 app.use('/api/shops/:shopId/swap-requests', swapRequestRoutes);
 app.use('/api/shops/:shopId/attendance', attendanceRoutes);
+app.use('/api/shops/:shopId/menu', shopMenuRoutes);
 app.use('/api/shops', shopRoutes);
 app.use('/api/staff-auth', staffAuthRoutes);
 app.use('/api/staff-permissions', staffPermissionRoutes);

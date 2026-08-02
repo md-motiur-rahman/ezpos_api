@@ -16,7 +16,7 @@ test('Owner returns true even for a made-up permission', () => {
 
 // --- Manager defaults ---
 
-test('Manager has inventory, stock orders, staff, till, H&S, rota, and granting permissions', () => {
+test('Manager has inventory, stock orders, staff, till, H&S, rota, menu, and granting permissions', () => {
   const expected = [
     PERMISSIONS.VIEW_INVENTORY,
     PERMISSIONS.MANAGE_INVENTORY,
@@ -26,6 +26,7 @@ test('Manager has inventory, stock orders, staff, till, H&S, rota, and granting 
     PERMISSIONS.PERFORM_HEALTH_SAFETY,
     PERMISSIONS.GRANT_PERMISSIONS,
     PERMISSIONS.MANAGE_ROTA,
+    PERMISSIONS.MANAGE_MENU,
   ];
   for (const permission of expected) {
     assert.equal(roleHasPermission(ROLES.MANAGER, permission), true);
@@ -48,6 +49,7 @@ test('Shift Manager does not have manager-level permissions by default', () => {
   assert.equal(roleHasPermission(ROLES.SHIFT_MANAGER, PERMISSIONS.MANAGE_STAFF), false);
   assert.equal(roleHasPermission(ROLES.SHIFT_MANAGER, PERMISSIONS.GRANT_PERMISSIONS), false);
   assert.equal(roleHasPermission(ROLES.SHIFT_MANAGER, PERMISSIONS.MANAGE_ROTA), false);
+  assert.equal(roleHasPermission(ROLES.SHIFT_MANAGER, PERMISSIONS.MANAGE_MENU), false);
 });
 
 // --- Server defaults ---

@@ -45,7 +45,11 @@ export async function createCompany(ownerUserId, data) {
   return toResponse(company);
 }
 
-async function getActiveCompanyOrThrow(ownerUserId) {
+/**
+ * Exported so menu.service.js (6.1) reuses this exact "find my active
+ * company or 404" logic rather than re-deriving it.
+ */
+export async function getActiveCompanyOrThrow(ownerUserId) {
   const company = await companyRepository.findActiveCompanyByOwner(ownerUserId);
   if (!company) {
     throw new AppError('No company found for this account', 404);

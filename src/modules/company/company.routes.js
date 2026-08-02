@@ -8,6 +8,7 @@ import {
   businessTypeSchema,
   billingHistoryQuerySchema,
 } from './company.validation.js';
+import menuRoutes from '../menu/menu.routes.js';
 
 const router = Router();
 
@@ -29,5 +30,8 @@ router.get(
   validateQuery(billingHistoryQuerySchema),
   companyController.getBillingHistory
 );
+// Menu management (6.1) - see menu.routes.js for why this is nested here
+// rather than an independent top-level mount.
+router.use('/mine', menuRoutes);
 
 export default router;

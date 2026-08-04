@@ -3,11 +3,12 @@ import { PERMISSIONS } from '../staff/permissions.js';
 import { resolveActorAuthority, assertHasPermission } from '../staff/actorAuthority.js';
 import * as shopRepository from '../shop/shop.repository.js';
 import * as menuRepository from './menu.repository.js';
+import { groupModifierRows } from './menu.service.js';
 import * as shopMenuRepository from './shopMenu.repository.js';
 
 const MANAGE_MENU_MESSAGE = "You do not have permission to manage this shop's menu";
 
-function toResolvedItem(row, variants) {
+function toResolvedItem(row, variants, modifierGroups) {
   return {
     id: row.id,
     source: 'master',
@@ -19,10 +20,11 @@ function toResolvedItem(row, variants) {
     isEnabled: row.is_enabled,
     displayOrder: row.display_order,
     variants,
+    modifierGroups,
   };
 }
 
-function toLocalItemAsResolved(row) {
+function toLocalItemAsResolved(row, modifierGroups) {
   return {
     id: row.id,
     source: 'local',
@@ -34,6 +36,7 @@ function toLocalItemAsResolved(row) {
     isEnabled: true, // local items have no override concept - they're this shop's own, always on
     displayOrder: row.display_order,
     variants: [], // variants are a master-item-only concept for now
+    modifierGroups,
   };
 }
 
@@ -86,6 +89,18 @@ function toVariantOverrideResponse(row) {
   };
 }
 
+function toModifierOptionOverrideResponse(row) {
+  return {
+    id: row.id,
+    shopId: row.shop_id,
+    modifierOptionId: row.modifier_option_id,
+    isEnabled: row.is_enabled,
+    priceDeltaOverride: row.price_delta_override === null ? null : Number(row.price_delta_override),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 /**
  * Resolves actor authority (scope check, 404 if none) and fetches the shop
  * itself in one step - every operation here needs both the actor's
@@ -115,6 +130,11 @@ export async function getResolvedMenu(actor, shopId) {
   const masterRows = await shopMenuRepository.listResolvedMasterItemsForShop(shopId, shop.company_id);
   const localRows = await shopMenuRepository.listActiveLocalItemsForShop(shopId);
   const variantRows = await shopMenuRepository.listResolvedVariantsForShop(shopId, shop.company_id);
+  const masterModifierRows = await shopMenuRepository.listResolvedModifierGroupsForMasterItems(
+    shopId,
+    shop.company_id
+  );
+  const localModifierRows = await shopMenuRepository.listResolvedModifierGroupsForLocalItems(shopId);
 
   // Group flat variant rows onto their parent item - response-shaping, done
   // here rather than in the repository, which just fetches data.
@@ -125,11 +145,20 @@ export async function getResolvedMenu(actor, shopId) {
     variantsByItemId.set(row.menu_item_id, list);
   }
 
+  // groupModifierRows is shared with menu.service.js's single-item
+  // management view (listItemModifierGroups) - same grouping algorithm,
+  // reused here for the whole-menu case rather than reimplemented.
+  const masterModifiersByItemId = groupModifierRows(masterModifierRows);
+  const localModifiersByItemId = groupModifierRows(localModifierRows);
+
   const resolvedMasterItems = masterRows.map((row) =>
-    toResolvedItem(row, variantsByItemId.get(row.id) ?? [])
+    toResolvedItem(row, variantsByItemId.get(row.id) ?? [], masterModifiersByItemId.get(row.id) ?? [])
+  );
+  const resolvedLocalItems = localRows.map((row) =>
+    toLocalItemAsResolved(row, localModifiersByItemId.get(row.id) ?? [])
   );
 
-  return [...resolvedMasterItems, ...localRows.map(toLocalItemAsResolved)];
+  return [...resolvedMasterItems, ...resolvedLocalItems];
 }
 
 /**
@@ -263,4 +292,76 @@ export async function deleteLocalItem(actor, shopId, itemId) {
 
   const item = await getLocalItemOrThrow(shopId, itemId);
   await shopMenuRepository.softDeleteLocalItem(item.id);
+}
+
+// --- Modifier option overrides (6.4) ---
+
+/**
+ * Same shape as setOverride/setVariantOverride above, one level down again -
+ * reuses menuRepository's option company-scoped lookup the same way item
+ * and variant overrides reuse their own lookups.
+ */
+export async function setModifierOptionOverride(actor, shopId, optionId, data) {
+  const { authority, shop } = await requireShopContext(actor, shopId);
+  assertHasPermission(authority, PERMISSIONS.MANAGE_MENU, MANAGE_MENU_MESSAGE);
+
+  const option = await menuRepository.findActiveOptionByIdForCompany(optionId, shop.company_id);
+  if (!option) {
+    throw new AppError('Modifier option not found', 404);
+  }
+
+  const override = await shopMenuRepository.upsertModifierOptionOverride(shopId, optionId, data);
+  return toModifierOptionOverrideResponse(override);
+}
+
+export async function clearModifierOptionOverride(actor, shopId, optionId) {
+  const { authority, shop } = await requireShopContext(actor, shopId);
+  assertHasPermission(authority, PERMISSIONS.MANAGE_MENU, MANAGE_MENU_MESSAGE);
+
+  const option = await menuRepository.findActiveOptionByIdForCompany(optionId, shop.company_id);
+  if (!option) {
+    throw new AppError('Modifier option not found', 404);
+  }
+
+  await shopMenuRepository.deleteModifierOptionOverride(shopId, optionId);
+}
+
+// --- Attaching modifier groups to LOCAL items (6.4) ---
+
+const POSTGRES_UNIQUE_VIOLATION = '23505';
+
+export async function attachModifierGroupToLocalItem(actor, shopId, itemId, groupId) {
+  const { authority, shop } = await requireShopContext(actor, shopId);
+  assertHasPermission(authority, PERMISSIONS.MANAGE_MENU, MANAGE_MENU_MESSAGE);
+
+  await getLocalItemOrThrow(shopId, itemId);
+  const group = await menuRepository.findActiveModifierGroupByIdForCompany(groupId, shop.company_id);
+  if (!group) {
+    throw new AppError('Modifier group not found', 404);
+  }
+
+  try {
+    await shopMenuRepository.attachModifierGroupToLocalItem(itemId, groupId);
+  } catch (err) {
+    if (err.code === POSTGRES_UNIQUE_VIOLATION) {
+      throw new AppError('This modifier group is already attached to this item', 409);
+    }
+    throw err;
+  }
+}
+
+export async function detachModifierGroupFromLocalItem(actor, shopId, itemId, groupId) {
+  const { authority, shop } = await requireShopContext(actor, shopId);
+  assertHasPermission(authority, PERMISSIONS.MANAGE_MENU, MANAGE_MENU_MESSAGE);
+
+  await getLocalItemOrThrow(shopId, itemId);
+  const group = await menuRepository.findActiveModifierGroupByIdForCompany(groupId, shop.company_id);
+  if (!group) {
+    throw new AppError('Modifier group not found', 404);
+  }
+
+  const detached = await shopMenuRepository.detachModifierGroupFromLocalItem(itemId, groupId);
+  if (!detached) {
+    throw new AppError('This modifier group is not attached to this item', 404);
+  }
 }

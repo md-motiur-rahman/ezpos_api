@@ -12,6 +12,13 @@ import {
   createVariantSchema,
   updateVariantSchema,
   variantIdParamSchema,
+  createModifierGroupSchema,
+  updateModifierGroupSchema,
+  modifierGroupIdParamSchema,
+  createModifierOptionSchema,
+  updateModifierOptionSchema,
+  modifierOptionIdParamSchema,
+  itemModifierGroupParamSchema,
 } from './menu.validation.js';
 
 /**
@@ -77,6 +84,65 @@ router.delete(
   '/menu-items/:itemId/variants/:variantId',
   validateParams(variantIdParamSchema),
   menuController.deleteVariant
+);
+
+// --- Modifiers (6.4) ---
+
+router.post(
+  '/modifier-groups',
+  validateBody(createModifierGroupSchema),
+  menuController.createModifierGroup
+);
+router.get('/modifier-groups', menuController.listModifierGroups);
+router.patch(
+  '/modifier-groups/:groupId',
+  validateParams(modifierGroupIdParamSchema),
+  validateBody(updateModifierGroupSchema),
+  menuController.updateModifierGroup
+);
+router.delete(
+  '/modifier-groups/:groupId',
+  validateParams(modifierGroupIdParamSchema),
+  menuController.deleteModifierGroup
+);
+
+router.post(
+  '/modifier-groups/:groupId/options',
+  validateParams(modifierGroupIdParamSchema),
+  validateBody(createModifierOptionSchema),
+  menuController.createModifierOption
+);
+router.get(
+  '/modifier-groups/:groupId/options',
+  validateParams(modifierGroupIdParamSchema),
+  menuController.listModifierOptions
+);
+router.patch(
+  '/modifier-groups/:groupId/options/:optionId',
+  validateParams(modifierOptionIdParamSchema),
+  validateBody(updateModifierOptionSchema),
+  menuController.updateModifierOption
+);
+router.delete(
+  '/modifier-groups/:groupId/options/:optionId',
+  validateParams(modifierOptionIdParamSchema),
+  menuController.deleteModifierOption
+);
+
+router.post(
+  '/menu-items/:itemId/modifier-groups/:groupId',
+  validateParams(itemModifierGroupParamSchema),
+  menuController.attachModifierGroupToItem
+);
+router.get(
+  '/menu-items/:itemId/modifier-groups',
+  validateParams(itemIdParamSchema),
+  menuController.listItemModifierGroups
+);
+router.delete(
+  '/menu-items/:itemId/modifier-groups/:groupId',
+  validateParams(itemModifierGroupParamSchema),
+  menuController.detachModifierGroupFromItem
 );
 
 export default router;

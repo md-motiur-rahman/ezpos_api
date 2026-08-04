@@ -65,3 +65,40 @@ export const deleteLocalItem = asyncHandler(async (req, res) => {
   await shopMenuService.deleteLocalItem(req.actor, req.params.shopId, req.params.itemId);
   res.status(200).json({ message: 'Local menu item deleted.' });
 });
+
+// --- Modifiers (6.4) ---
+
+export const setModifierOptionOverride = asyncHandler(async (req, res) => {
+  const override = await shopMenuService.setModifierOptionOverride(
+    req.actor,
+    req.params.shopId,
+    req.params.optionId,
+    req.body
+  );
+  res.status(200).json(override);
+});
+
+export const clearModifierOptionOverride = asyncHandler(async (req, res) => {
+  await shopMenuService.clearModifierOptionOverride(req.actor, req.params.shopId, req.params.optionId);
+  res.status(200).json({ message: 'Modifier option override cleared - reverted to master defaults.' });
+});
+
+export const attachModifierGroupToLocalItem = asyncHandler(async (req, res) => {
+  await shopMenuService.attachModifierGroupToLocalItem(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId,
+    req.params.groupId
+  );
+  res.status(201).json({ message: 'Modifier group attached.' });
+});
+
+export const detachModifierGroupFromLocalItem = asyncHandler(async (req, res) => {
+  await shopMenuService.detachModifierGroupFromLocalItem(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId,
+    req.params.groupId
+  );
+  res.status(200).json({ message: 'Modifier group detached.' });
+});

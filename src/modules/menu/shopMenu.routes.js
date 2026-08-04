@@ -10,6 +10,9 @@ import {
   menuItemIdParamSchema,
   variantOverrideSchema,
   variantIdParamSchema,
+  modifierOptionOverrideSchema,
+  modifierOptionIdParamSchema,
+  localItemModifierGroupParamSchema,
 } from './shopMenu.validation.js';
 import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
 
@@ -78,6 +81,31 @@ router.delete(
   '/items/:itemId',
   validateParams(localItemIdParamSchema),
   shopMenuController.deleteLocalItem
+);
+
+// --- Modifiers (6.4) ---
+
+router.patch(
+  '/modifier-options/:optionId',
+  validateParams(modifierOptionIdParamSchema),
+  validateBody(modifierOptionOverrideSchema),
+  shopMenuController.setModifierOptionOverride
+);
+router.delete(
+  '/modifier-options/:optionId',
+  validateParams(modifierOptionIdParamSchema),
+  shopMenuController.clearModifierOptionOverride
+);
+
+router.post(
+  '/items/:itemId/modifier-groups/:groupId',
+  validateParams(localItemModifierGroupParamSchema),
+  shopMenuController.attachModifierGroupToLocalItem
+);
+router.delete(
+  '/items/:itemId/modifier-groups/:groupId',
+  validateParams(localItemModifierGroupParamSchema),
+  shopMenuController.detachModifierGroupFromLocalItem
 );
 
 export default router;

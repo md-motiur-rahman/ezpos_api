@@ -161,3 +161,102 @@ export async function listResolvedVariantsForShop(shopId, companyId) {
   );
   return rows;
 }
+
+// --- Modifier option overrides (6.4) ---
+
+/** Same native-upsert pattern as item/variant overrides - one level down again, on modifier options. */
+export async function upsertModifierOptionOverride(shopId, optionId, { isEnabled, priceDeltaOverride }) {
+  const { rows } = await query(
+    `INSERT INTO shop_menu_modifier_option_overrides (shop_id, modifier_option_id, is_enabled, price_delta_override)
+     VALUES ($1, $2, COALESCE($3, true), $4)
+     ON CONFLICT (shop_id, modifier_option_id) DO UPDATE
+       SET is_enabled = COALESCE($3, shop_menu_modifier_option_overrides.is_enabled),
+           price_delta_override = COALESCE($4, shop_menu_modifier_option_overrides.price_delta_override),
+           updated_at = now()
+     RETURNING id, shop_id, modifier_option_id, is_enabled, price_delta_override, created_at, updated_at`,
+    [shopId, optionId, isEnabled ?? null, priceDeltaOverride ?? null]
+  );
+  return rows[0];
+}
+
+export async function deleteModifierOptionOverride(shopId, optionId) {
+  await query(
+    `DELETE FROM shop_menu_modifier_option_overrides WHERE shop_id = $1 AND modifier_option_id = $2`,
+    [shopId, optionId]
+  );
+}
+
+/**
+ * Every modifier group+option attached to any MASTER item for the company,
+ * resolved against this shop's option overrides - flat rows, same shape as
+ * menu.repository.js's listAttachedModifierGroupsForItem, so
+ * menuService.groupModifierRows() (6.4) groups both identically.
+ */
+export async function listResolvedModifierGroupsForMasterItems(shopId, companyId) {
+  const { rows } = await query(
+    `SELECT mi.id AS item_id,
+            mg.id AS group_id, mg.name AS group_name,
+            mg.min_selections, mg.max_selections,
+            mo.id AS option_id, mo.name AS option_name,
+            mo.price_delta AS master_price_delta,
+            COALESCE(smoo.price_delta_override, mo.price_delta) AS effective_price_delta,
+            COALESCE(smoo.is_enabled, true) AS is_enabled
+     FROM menu_item_modifier_groups mimg
+     JOIN menu_items mi ON mi.id = mimg.menu_item_id AND mi.deleted_at IS NULL
+     JOIN menu_categories mc ON mc.id = mi.category_id AND mc.deleted_at IS NULL
+     JOIN modifier_groups mg ON mg.id = mimg.modifier_group_id AND mg.deleted_at IS NULL
+     JOIN modifier_options mo ON mo.modifier_group_id = mg.id AND mo.deleted_at IS NULL
+     LEFT JOIN shop_menu_modifier_option_overrides smoo
+       ON smoo.modifier_option_id = mo.id AND smoo.shop_id = $1
+     WHERE mc.company_id = $2
+     ORDER BY mi.id, mg.name, mo.display_order, mo.name`,
+    [shopId, companyId]
+  );
+  return rows;
+}
+
+/** Same as above, one level down for LOCAL items - identically-shaped flat rows. */
+export async function listResolvedModifierGroupsForLocalItems(shopId) {
+  const { rows } = await query(
+    `SELECT smi.id AS item_id,
+            mg.id AS group_id, mg.name AS group_name,
+            mg.min_selections, mg.max_selections,
+            mo.id AS option_id, mo.name AS option_name,
+            mo.price_delta AS master_price_delta,
+            COALESCE(smoo.price_delta_override, mo.price_delta) AS effective_price_delta,
+            COALESCE(smoo.is_enabled, true) AS is_enabled
+     FROM shop_menu_item_modifier_groups smimg
+     JOIN shop_menu_items smi ON smi.id = smimg.shop_menu_item_id AND smi.deleted_at IS NULL
+     JOIN modifier_groups mg ON mg.id = smimg.modifier_group_id AND mg.deleted_at IS NULL
+     JOIN modifier_options mo ON mo.modifier_group_id = mg.id AND mo.deleted_at IS NULL
+     LEFT JOIN shop_menu_modifier_option_overrides smoo
+       ON smoo.modifier_option_id = mo.id AND smoo.shop_id = smi.shop_id
+     WHERE smi.shop_id = $1
+     ORDER BY smi.id, mg.name, mo.display_order, mo.name`,
+    [shopId]
+  );
+  return rows;
+}
+
+// --- Modifier group <-> LOCAL item attachment ---
+
+/** Throws Postgres unique-violation (23505) if already attached - same as the master-item version. */
+export async function attachModifierGroupToLocalItem(shopMenuItemId, modifierGroupId) {
+  const { rows } = await query(
+    `INSERT INTO shop_menu_item_modifier_groups (shop_menu_item_id, modifier_group_id)
+     VALUES ($1, $2)
+     RETURNING id, shop_menu_item_id, modifier_group_id, created_at`,
+    [shopMenuItemId, modifierGroupId]
+  );
+  return rows[0];
+}
+
+export async function detachModifierGroupFromLocalItem(shopMenuItemId, modifierGroupId) {
+  const { rows } = await query(
+    `DELETE FROM shop_menu_item_modifier_groups
+     WHERE shop_menu_item_id = $1 AND modifier_group_id = $2
+     RETURNING id`,
+    [shopMenuItemId, modifierGroupId]
+  );
+  return rows[0] ?? null;
+}

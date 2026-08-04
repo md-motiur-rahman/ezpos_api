@@ -57,3 +57,61 @@ export const variantIdParamSchema = z.object({
   itemId: z.string().uuid('Invalid item id'),
   variantId: z.string().uuid('Invalid variant id'),
 });
+
+// --- Modifiers (6.4) ---
+
+export const createModifierGroupSchema = z
+  .object({
+    name: z.string().trim().min(1, 'Group name is required'),
+    minSelections: z.number().int().min(0).optional(),
+    maxSelections: z.number().int().min(1).optional(),
+  })
+  .refine((data) => (data.minSelections ?? 0) <= (data.maxSelections ?? 1), {
+    message: 'minSelections cannot be greater than maxSelections',
+    path: ['minSelections'],
+  });
+
+export const updateModifierGroupSchema = z
+  .object({
+    name: z.string().trim().min(1, 'Group name is required').optional(),
+    minSelections: z.number().int().min(0).optional(),
+    maxSelections: z.number().int().min(1).optional(),
+  })
+  .refine(
+    (data) =>
+      data.minSelections === undefined ||
+      data.maxSelections === undefined ||
+      data.minSelections <= data.maxSelections,
+    {
+      message: 'minSelections cannot be greater than maxSelections',
+      path: ['minSelections'],
+    }
+  );
+
+export const modifierGroupIdParamSchema = z.object({
+  groupId: z.string().uuid('Invalid modifier group id'),
+});
+
+export const createModifierOptionSchema = z.object({
+  name: z.string().trim().min(1, 'Option name is required'),
+  // A delta, not an absolute price - can legitimately be negative, zero, or
+  // positive, so no .positive() constraint here.
+  priceDelta: z.number().finite().optional(),
+  displayOrder: z.number().int().optional(),
+});
+
+export const updateModifierOptionSchema = z.object({
+  name: z.string().trim().min(1, 'Option name is required').optional(),
+  priceDelta: z.number().finite().optional(),
+  displayOrder: z.number().int().optional(),
+});
+
+export const modifierOptionIdParamSchema = z.object({
+  groupId: z.string().uuid('Invalid modifier group id'),
+  optionId: z.string().uuid('Invalid modifier option id'),
+});
+
+export const itemModifierGroupParamSchema = z.object({
+  itemId: z.string().uuid('Invalid item id'),
+  groupId: z.string().uuid('Invalid modifier group id'),
+});

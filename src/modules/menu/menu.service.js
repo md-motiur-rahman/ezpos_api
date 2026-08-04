@@ -20,8 +20,6 @@ function toItemResponse(item) {
     categoryId: item.category_id,
     name: item.name,
     description: item.description,
-    // pg returns NUMERIC columns as strings - convert to a real number,
-    // same pattern as shops.default_vat_rate.
     price: Number(item.price),
     displayOrder: item.display_order,
     createdAt: item.created_at,
@@ -190,4 +188,192 @@ export async function deleteVariant(ownerUserId, itemId, variantId) {
   const variant = await getVariantOrThrow(itemId, variantId);
 
   await menuRepository.softDeleteVariant(variant.id);
+}
+
+// --- Modifiers (6.4) ---
+
+function toModifierGroupResponse(group) {
+  return {
+    id: group.id,
+    companyId: group.company_id,
+    name: group.name,
+    minSelections: group.min_selections,
+    maxSelections: group.max_selections,
+    createdAt: group.created_at,
+    updatedAt: group.updated_at,
+  };
+}
+
+function toModifierOptionResponse(option) {
+  return {
+    id: option.id,
+    modifierGroupId: option.modifier_group_id,
+    name: option.name,
+    priceDelta: Number(option.price_delta),
+    displayOrder: option.display_order,
+    createdAt: option.created_at,
+    updatedAt: option.updated_at,
+  };
+}
+
+export async function createModifierGroup(ownerUserId, data) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  const group = await menuRepository.createModifierGroup(company.id, data);
+  return toModifierGroupResponse(group);
+}
+
+export async function listModifierGroups(ownerUserId) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  const groups = await menuRepository.listActiveModifierGroupsForCompany(company.id);
+  return groups.map(toModifierGroupResponse);
+}
+
+async function getModifierGroupOrThrow(companyId, groupId) {
+  const group = await menuRepository.findActiveModifierGroupByIdForCompany(groupId, companyId);
+  if (!group) {
+    throw new AppError('Modifier group not found', 404);
+  }
+  return group;
+}
+
+export async function updateModifierGroup(ownerUserId, groupId, data) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getModifierGroupOrThrow(company.id, groupId);
+  const updated = await menuRepository.updateModifierGroup(groupId, data);
+  return toModifierGroupResponse(updated);
+}
+
+/** A group with any (non-deleted) options cannot be deleted - remove options first, same rule as categories (6.1). */
+export async function deleteModifierGroup(ownerUserId, groupId) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getModifierGroupOrThrow(company.id, groupId);
+
+  const optionCount = await menuRepository.countActiveOptionsInGroup(groupId);
+  if (optionCount > 0) {
+    throw new AppError('Cannot delete a modifier group that still has options - remove all options first', 409);
+  }
+
+  await menuRepository.softDeleteModifierGroup(groupId);
+}
+
+export async function createModifierOption(ownerUserId, groupId, data) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getModifierGroupOrThrow(company.id, groupId);
+
+  const option = await menuRepository.createModifierOption(groupId, data);
+  return toModifierOptionResponse(option);
+}
+
+export async function listModifierOptions(ownerUserId, groupId) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getModifierGroupOrThrow(company.id, groupId);
+
+  const options = await menuRepository.listActiveOptionsForGroup(groupId);
+  return options.map(toModifierOptionResponse);
+}
+
+async function getModifierOptionOrThrow(groupId, optionId) {
+  const option = await menuRepository.findActiveOptionByIdForGroup(optionId, groupId);
+  if (!option) {
+    throw new AppError('Modifier option not found', 404);
+  }
+  return option;
+}
+
+export async function updateModifierOption(ownerUserId, groupId, optionId, data) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getModifierGroupOrThrow(company.id, groupId);
+  await getModifierOptionOrThrow(groupId, optionId);
+
+  const updated = await menuRepository.updateModifierOption(optionId, data);
+  return toModifierOptionResponse(updated);
+}
+
+export async function deleteModifierOption(ownerUserId, groupId, optionId) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getModifierGroupOrThrow(company.id, groupId);
+  const option = await getModifierOptionOrThrow(groupId, optionId);
+
+  await menuRepository.softDeleteModifierOption(option.id);
+}
+
+// --- Attaching modifier groups to MASTER items ---
+
+const POSTGRES_UNIQUE_VIOLATION = '23505';
+
+export async function attachModifierGroupToItem(ownerUserId, itemId, groupId) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getItemOrThrow(company.id, itemId);
+  await getModifierGroupOrThrow(company.id, groupId);
+
+  try {
+    await menuRepository.attachModifierGroupToItem(itemId, groupId);
+  } catch (err) {
+    if (err.code === POSTGRES_UNIQUE_VIOLATION) {
+      throw new AppError('This modifier group is already attached to this item', 409);
+    }
+    throw err;
+  }
+}
+
+export async function detachModifierGroupFromItem(ownerUserId, itemId, groupId) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getItemOrThrow(company.id, itemId);
+  await getModifierGroupOrThrow(company.id, groupId);
+
+  const detached = await menuRepository.detachModifierGroupFromItem(itemId, groupId);
+  if (!detached) {
+    throw new AppError('This modifier group is not attached to this item', 404);
+  }
+}
+
+export async function listItemModifierGroups(ownerUserId, itemId) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getItemOrThrow(company.id, itemId);
+
+  const rows = await menuRepository.listAttachedModifierGroupsForItem(itemId);
+  return groupModifierRows(rows).get(itemId) ?? [];
+}
+
+/**
+ * Shared by BOTH master and local item modifier resolution (used again in
+ * shopMenu.service.js) - one grouping algorithm, three call sites (master
+ * resolved menu, local resolved menu, and this single-item management
+ * view), since all three repository queries return identically-shaped flat
+ * rows. Exported so shopMenu.service.js reuses this exact function rather
+ * than reimplementing the same two-level grouping a second time.
+ */
+export function groupModifierRows(rows) {
+  const groupsByItemId = new Map();
+  for (const row of rows) {
+    let itemGroups = groupsByItemId.get(row.item_id);
+    if (!itemGroups) {
+      itemGroups = new Map();
+      groupsByItemId.set(row.item_id, itemGroups);
+    }
+    let group = itemGroups.get(row.group_id);
+    if (!group) {
+      group = {
+        id: row.group_id,
+        name: row.group_name,
+        minSelections: row.min_selections,
+        maxSelections: row.max_selections,
+        options: [],
+      };
+      itemGroups.set(row.group_id, group);
+    }
+    group.options.push({
+      id: row.option_id,
+      name: row.option_name,
+      price: Number(row.effective_price_delta),
+      masterPriceDelta: Number(row.master_price_delta),
+      isEnabled: row.is_enabled,
+    });
+  }
+
+  const result = new Map();
+  for (const [itemId, itemGroupsMap] of groupsByItemId) {
+    result.set(itemId, Array.from(itemGroupsMap.values()));
+  }
+  return result;
 }

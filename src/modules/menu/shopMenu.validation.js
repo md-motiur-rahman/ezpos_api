@@ -33,3 +33,25 @@ export const variantIdParamSchema = z.object({
   shopId: z.string().uuid('Invalid shop id'),
   variantId: z.string().uuid('Invalid variant id'),
 });
+
+// --- Modifiers (6.4) ---
+
+// Deliberately NOT overrideSchema.extend() - price here is a DELTA
+// (priceDeltaOverride, can be negative/zero/positive), not an absolute
+// override price. Reusing overrideSchema via .extend() would incorrectly
+// leave its unrelated, positive-only `priceOverride` field still accepted.
+export const modifierOptionOverrideSchema = z.object({
+  isEnabled: z.boolean().optional(),
+  priceDeltaOverride: z.number().finite().optional(),
+});
+
+export const modifierOptionIdParamSchema = z.object({
+  shopId: z.string().uuid('Invalid shop id'),
+  optionId: z.string().uuid('Invalid modifier option id'),
+});
+
+export const localItemModifierGroupParamSchema = z.object({
+  shopId: z.string().uuid('Invalid shop id'),
+  itemId: z.string().uuid('Invalid item id'),
+  groupId: z.string().uuid('Invalid modifier group id'),
+});

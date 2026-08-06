@@ -102,3 +102,25 @@ export const detachModifierGroupFromLocalItem = asyncHandler(async (req, res) =>
   );
   res.status(200).json({ message: 'Modifier group detached.' });
 });
+
+// --- Ingredients / allergens (6.5) ---
+
+export const attachIngredientToLocalItem = asyncHandler(async (req, res) => {
+  await shopMenuService.attachIngredientToLocalItem(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId,
+    req.params.ingredientId
+  );
+  res.status(201).json({ message: 'Ingredient attached.' });
+});
+
+export const detachIngredientFromLocalItem = asyncHandler(async (req, res) => {
+  await shopMenuService.detachIngredientFromLocalItem(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId,
+    req.params.ingredientId
+  );
+  res.status(200).json({ message: 'Ingredient detached.' });
+});

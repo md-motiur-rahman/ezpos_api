@@ -8,7 +8,7 @@ import * as shopMenuRepository from './shopMenu.repository.js';
 
 const MANAGE_MENU_MESSAGE = "You do not have permission to manage this shop's menu";
 
-function toResolvedItem(row, variants, modifierGroups) {
+function toResolvedItem(row, variants, modifierGroups, allergens) {
   return {
     id: row.id,
     source: 'master',
@@ -21,10 +21,11 @@ function toResolvedItem(row, variants, modifierGroups) {
     displayOrder: row.display_order,
     variants,
     modifierGroups,
+    allergens,
   };
 }
 
-function toLocalItemAsResolved(row, modifierGroups) {
+function toLocalItemAsResolved(row, modifierGroups, allergens) {
   return {
     id: row.id,
     source: 'local',
@@ -37,6 +38,7 @@ function toLocalItemAsResolved(row, modifierGroups) {
     displayOrder: row.display_order,
     variants: [], // variants are a master-item-only concept for now
     modifierGroups,
+    allergens,
   };
 }
 
@@ -120,9 +122,7 @@ async function requireShopContext(actor, shopId) {
  * The resolved, ready-to-use menu: every master item (override applied if
  * one exists, else master defaults) plus every shop-local item, each tagged
  * with `source`. This is what Module 9 (till) will eventually consume.
- * Read access stays open to any in-scope actor - same "reads stay open"
- * principle as 5.1/5.2/5.3, since a Server has an obvious need to see the
- * live menu.
+ * Read access stays open to any in-scope actor.
  */
 export async function getResolvedMenu(actor, shopId) {
   const { shop } = await requireShopContext(actor, shopId);
@@ -135,6 +135,10 @@ export async function getResolvedMenu(actor, shopId) {
     shop.company_id
   );
   const localModifierRows = await shopMenuRepository.listResolvedModifierGroupsForLocalItems(shopId);
+  const masterAllergenRows = await shopMenuRepository.listAggregatedAllergensForMasterItems(
+    shop.company_id
+  );
+  const localAllergenRows = await shopMenuRepository.listAggregatedAllergensForLocalItems(shopId);
 
   // Group flat variant rows onto their parent item - response-shaping, done
   // here rather than in the repository, which just fetches data.
@@ -151,22 +155,32 @@ export async function getResolvedMenu(actor, shopId) {
   const masterModifiersByItemId = groupModifierRows(masterModifierRows);
   const localModifiersByItemId = groupModifierRows(localModifierRows);
 
+  // Allergens are already aggregated (unioned+deduped) by Postgres itself -
+  // just a flat Map here, no JS-side grouping needed, unlike modifiers.
+  const masterAllergensByItemId = new Map(
+    masterAllergenRows.map((row) => [row.item_id, row.allergens])
+  );
+  const localAllergensByItemId = new Map(localAllergenRows.map((row) => [row.item_id, row.allergens]));
+
   const resolvedMasterItems = masterRows.map((row) =>
-    toResolvedItem(row, variantsByItemId.get(row.id) ?? [], masterModifiersByItemId.get(row.id) ?? [])
+    toResolvedItem(
+      row,
+      variantsByItemId.get(row.id) ?? [],
+      masterModifiersByItemId.get(row.id) ?? [],
+      masterAllergensByItemId.get(row.id) ?? []
+    )
   );
   const resolvedLocalItems = localRows.map((row) =>
-    toLocalItemAsResolved(row, localModifiersByItemId.get(row.id) ?? [])
+    toLocalItemAsResolved(
+      row,
+      localModifiersByItemId.get(row.id) ?? [],
+      localAllergensByItemId.get(row.id) ?? []
+    )
   );
 
   return [...resolvedMasterItems, ...resolvedLocalItems];
 }
 
-/**
- * Confirms the target menu item is real and belongs to THIS shop's company
- * before allowing an override to be set - reuses 6.1's existing lookup
- * rather than a new one, since "is this a real item of mine" is exactly
- * what findActiveItemByIdForCompany already answers.
- */
 export async function setOverride(actor, shopId, menuItemId, data) {
   const { authority, shop } = await requireShopContext(actor, shopId);
   assertHasPermission(authority, PERMISSIONS.MANAGE_MENU, MANAGE_MENU_MESSAGE);
@@ -194,11 +208,6 @@ export async function clearOverride(actor, shopId, menuItemId) {
 
 // --- Variant overrides (6.3) ---
 
-/**
- * Same shape as setOverride/clearOverride above, one level down - reuses
- * menuRepository's variant lookup (company-scoped) the same way item
- * overrides reuse the item lookup.
- */
 export async function setVariantOverride(actor, shopId, variantId, data) {
   const { authority, shop } = await requireShopContext(actor, shopId);
   assertHasPermission(authority, PERMISSIONS.MANAGE_MENU, MANAGE_MENU_MESSAGE);
@@ -230,8 +239,6 @@ export async function createLocalItem(actor, shopId, { categoryId, name, descrip
   const { authority, shop } = await requireShopContext(actor, shopId);
   assertHasPermission(authority, PERMISSIONS.MANAGE_MENU, MANAGE_MENU_MESSAGE);
 
-  // The category still has to be one of the company's real categories - a
-  // local item still needs to show up under "Mains" like everything else.
   const category = await menuRepository.findActiveCategoryByIdForCompany(categoryId, shop.company_id);
   if (!category) {
     throw new AppError('Category not found', 404);
@@ -296,11 +303,6 @@ export async function deleteLocalItem(actor, shopId, itemId) {
 
 // --- Modifier option overrides (6.4) ---
 
-/**
- * Same shape as setOverride/setVariantOverride above, one level down again -
- * reuses menuRepository's option company-scoped lookup the same way item
- * and variant overrides reuse their own lookups.
- */
 export async function setModifierOptionOverride(actor, shopId, optionId, data) {
   const { authority, shop } = await requireShopContext(actor, shopId);
   assertHasPermission(authority, PERMISSIONS.MANAGE_MENU, MANAGE_MENU_MESSAGE);
@@ -363,5 +365,49 @@ export async function detachModifierGroupFromLocalItem(actor, shopId, itemId, gr
   const detached = await shopMenuRepository.detachModifierGroupFromLocalItem(itemId, groupId);
   if (!detached) {
     throw new AppError('This modifier group is not attached to this item', 404);
+  }
+}
+
+// --- Attaching ingredients to a LOCAL item's recipe (6.5) ---
+
+export async function attachIngredientToLocalItem(actor, shopId, itemId, ingredientId) {
+  const { authority, shop } = await requireShopContext(actor, shopId);
+  assertHasPermission(authority, PERMISSIONS.MANAGE_MENU, MANAGE_MENU_MESSAGE);
+
+  await getLocalItemOrThrow(shopId, itemId);
+  const ingredient = await menuRepository.findActiveIngredientByIdForCompany(
+    ingredientId,
+    shop.company_id
+  );
+  if (!ingredient) {
+    throw new AppError('Ingredient not found', 404);
+  }
+
+  try {
+    await shopMenuRepository.attachIngredientToLocalItem(itemId, ingredientId);
+  } catch (err) {
+    if (err.code === POSTGRES_UNIQUE_VIOLATION) {
+      throw new AppError('This ingredient is already attached to this item', 409);
+    }
+    throw err;
+  }
+}
+
+export async function detachIngredientFromLocalItem(actor, shopId, itemId, ingredientId) {
+  const { authority, shop } = await requireShopContext(actor, shopId);
+  assertHasPermission(authority, PERMISSIONS.MANAGE_MENU, MANAGE_MENU_MESSAGE);
+
+  await getLocalItemOrThrow(shopId, itemId);
+  const ingredient = await menuRepository.findActiveIngredientByIdForCompany(
+    ingredientId,
+    shop.company_id
+  );
+  if (!ingredient) {
+    throw new AppError('Ingredient not found', 404);
+  }
+
+  const detached = await shopMenuRepository.detachIngredientFromLocalItem(itemId, ingredientId);
+  if (!detached) {
+    throw new AppError('This ingredient is not attached to this item', 404);
   }
 }

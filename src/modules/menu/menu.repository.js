@@ -1,5 +1,5 @@
 import { query } from '../../db/pool.js';
-import { buildUpdateSet } from '../../utils/sql.js';
+import { buildUpdateSet, attachRelationship, detachRelationship } from '../../utils/sql.js';
 
 const CATEGORY_COLUMNS = `id, company_id, name, display_order, is_active, created_at, updated_at`;
 const ITEM_COLUMNS = `id, category_id, name, description, price, display_order, created_at, updated_at`;
@@ -321,23 +321,23 @@ export async function softDeleteModifierOption(id) {
 
 /** Throws Postgres unique-violation (23505) if this group is already attached to this item. */
 export async function attachModifierGroupToItem(menuItemId, modifierGroupId) {
-  const { rows } = await query(
-    `INSERT INTO menu_item_modifier_groups (menu_item_id, modifier_group_id)
-     VALUES ($1, $2)
-     RETURNING id, menu_item_id, modifier_group_id, created_at`,
-    [menuItemId, modifierGroupId]
+  return attachRelationship(
+    'menu_item_modifier_groups',
+    'menu_item_id',
+    menuItemId,
+    'modifier_group_id',
+    modifierGroupId
   );
-  return rows[0];
 }
 
 export async function detachModifierGroupFromItem(menuItemId, modifierGroupId) {
-  const { rows } = await query(
-    `DELETE FROM menu_item_modifier_groups
-     WHERE menu_item_id = $1 AND modifier_group_id = $2
-     RETURNING id`,
-    [menuItemId, modifierGroupId]
+  return detachRelationship(
+    'menu_item_modifier_groups',
+    'menu_item_id',
+    menuItemId,
+    'modifier_group_id',
+    modifierGroupId
   );
-  return rows[0] ?? null;
 }
 
 /**
@@ -364,6 +364,89 @@ export async function listAttachedModifierGroupsForItem(menuItemId) {
      JOIN modifier_groups mg ON mg.id = mimg.modifier_group_id AND mg.deleted_at IS NULL
      JOIN modifier_options mo ON mo.modifier_group_id = mg.id AND mo.deleted_at IS NULL
      ORDER BY mg.name, mo.display_order, mo.name`,
+    [menuItemId]
+  );
+  return rows;
+}
+
+// --- Ingredients / allergens (6.5) ---
+
+const INGREDIENT_COLUMNS = `id, company_id, name, allergens, created_at, updated_at`;
+
+export async function createIngredient(companyId, { name, allergens }) {
+  const { rows } = await query(
+    `INSERT INTO ingredients (company_id, name, allergens)
+     VALUES ($1, $2, $3)
+     RETURNING ${INGREDIENT_COLUMNS}`,
+    [companyId, name, allergens ?? []]
+  );
+  return rows[0];
+}
+
+export async function listActiveIngredientsForCompany(companyId) {
+  const { rows } = await query(
+    `SELECT ${INGREDIENT_COLUMNS} FROM ingredients
+     WHERE company_id = $1 AND deleted_at IS NULL
+     ORDER BY name`,
+    [companyId]
+  );
+  return rows;
+}
+
+export async function findActiveIngredientByIdForCompany(id, companyId) {
+  const { rows } = await query(
+    `SELECT ${INGREDIENT_COLUMNS} FROM ingredients
+     WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL`,
+    [id, companyId]
+  );
+  return rows[0] ?? null;
+}
+
+export async function updateIngredient(id, data) {
+  const fieldMap = { name: 'name', allergens: 'allergens' };
+  const { clause, values } = buildUpdateSet(fieldMap, data);
+  values.push(id);
+  const { rows } = await query(
+    `UPDATE ingredients SET ${clause} WHERE id = $${values.length} RETURNING ${INGREDIENT_COLUMNS}`,
+    values
+  );
+  return rows[0];
+}
+
+export async function softDeleteIngredient(id) {
+  await query(`UPDATE ingredients SET deleted_at = now(), updated_at = now() WHERE id = $1`, [id]);
+}
+
+// --- Ingredient <-> MASTER item attachment (the item's "recipe") ---
+
+/** Throws Postgres unique-violation (23505) if this ingredient is already attached to this item. */
+export async function attachIngredientToItem(menuItemId, ingredientId) {
+  return attachRelationship(
+    'menu_item_ingredients',
+    'menu_item_id',
+    menuItemId,
+    'ingredient_id',
+    ingredientId
+  );
+}
+
+export async function detachIngredientFromItem(menuItemId, ingredientId) {
+  return detachRelationship(
+    'menu_item_ingredients',
+    'menu_item_id',
+    menuItemId,
+    'ingredient_id',
+    ingredientId
+  );
+}
+
+export async function listAttachedIngredientsForItem(menuItemId) {
+  const { rows } = await query(
+    `SELECT i.id, i.company_id, i.name, i.allergens, i.created_at, i.updated_at
+     FROM menu_item_ingredients mii
+     JOIN ingredients i ON i.id = mii.ingredient_id AND i.deleted_at IS NULL
+     WHERE mii.menu_item_id = $1
+     ORDER BY i.name`,
     [menuItemId]
   );
   return rows;

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ALLERGENS } from './allergens.js';
 
 export const createCategorySchema = z.object({
   name: z.string().trim().min(1, 'Category name is required'),
@@ -114,4 +115,25 @@ export const modifierOptionIdParamSchema = z.object({
 export const itemModifierGroupParamSchema = z.object({
   itemId: z.string().uuid('Invalid item id'),
   groupId: z.string().uuid('Invalid modifier group id'),
+});
+
+// --- Ingredients / allergens (6.5) ---
+
+export const createIngredientSchema = z.object({
+  name: z.string().trim().min(1, 'Ingredient name is required'),
+  allergens: z.array(z.enum(ALLERGENS)).optional(),
+});
+
+export const updateIngredientSchema = z.object({
+  name: z.string().trim().min(1, 'Ingredient name is required').optional(),
+  allergens: z.array(z.enum(ALLERGENS)).optional(),
+});
+
+export const ingredientIdParamSchema = z.object({
+  ingredientId: z.string().uuid('Invalid ingredient id'),
+});
+
+export const itemIngredientParamSchema = z.object({
+  itemId: z.string().uuid('Invalid item id'),
+  ingredientId: z.string().uuid('Invalid ingredient id'),
 });

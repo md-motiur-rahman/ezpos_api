@@ -1,3 +1,5 @@
+import { query } from '../db/pool.js';
+
 /**
  * Builds a parameterized SQL SET clause from only the fields actually
  * present in `data` - the core of every partial UPDATE in this project.
@@ -27,4 +29,39 @@ export function buildUpdateSet(fieldMap, data) {
   setClauses.push('updated_at = now()');
 
   return { clause: setClauses.join(', '), values };
+}
+
+/**
+ * Generic attach for a two-column many-to-many join table (id, two FK
+ * columns, created_at). Used for every "attach X to Y" relationship in this
+ * project - modifier groups to items (6.4), ingredients to items (6.5) -
+ * rather than a near-identical INSERT written per relationship.
+ *
+ * table/columnA/columnB are always hardcoded string literals passed by
+ * trusted internal code, never user input - same trust boundary already
+ * relied on throughout this project's raw-SQL repositories (e.g. every
+ * COLUMNS constant, buildUpdateSet's fieldMap keys). Postgres can't
+ * parameterize identifiers via $N placeholders, only values.
+ *
+ * Throws Postgres unique-violation (23505) if the pair is already attached -
+ * the caller's service layer catches this and turns it into a 409.
+ */
+export async function attachRelationship(table, columnA, valueA, columnB, valueB) {
+  const { rows } = await query(
+    `INSERT INTO ${table} (${columnA}, ${columnB})
+     VALUES ($1, $2)
+     RETURNING id, ${columnA}, ${columnB}, created_at`,
+    [valueA, valueB]
+  );
+  return rows[0];
+}
+
+export async function detachRelationship(table, columnA, valueA, columnB, valueB) {
+  const { rows } = await query(
+    `DELETE FROM ${table}
+     WHERE ${columnA} = $1 AND ${columnB} = $2
+     RETURNING id`,
+    [valueA, valueB]
+  );
+  return rows[0] ?? null;
 }

@@ -134,3 +134,40 @@ export const listItemModifierGroups = asyncHandler(async (req, res) => {
   const groups = await menuService.listItemModifierGroups(req.user.id, req.params.itemId);
   res.status(200).json(groups);
 });
+
+// --- Ingredients / allergens (6.5) ---
+
+export const createIngredient = asyncHandler(async (req, res) => {
+  const ingredient = await menuService.createIngredient(req.user.id, req.body);
+  res.status(201).json(ingredient);
+});
+
+export const listIngredients = asyncHandler(async (req, res) => {
+  const ingredients = await menuService.listIngredients(req.user.id);
+  res.status(200).json(ingredients);
+});
+
+export const updateIngredient = asyncHandler(async (req, res) => {
+  const ingredient = await menuService.updateIngredient(req.user.id, req.params.ingredientId, req.body);
+  res.status(200).json(ingredient);
+});
+
+export const deleteIngredient = asyncHandler(async (req, res) => {
+  await menuService.deleteIngredient(req.user.id, req.params.ingredientId);
+  res.status(200).json({ message: 'Ingredient deleted.' });
+});
+
+export const attachIngredientToItem = asyncHandler(async (req, res) => {
+  await menuService.attachIngredientToItem(req.user.id, req.params.itemId, req.params.ingredientId);
+  res.status(201).json({ message: 'Ingredient attached.' });
+});
+
+export const detachIngredientFromItem = asyncHandler(async (req, res) => {
+  await menuService.detachIngredientFromItem(req.user.id, req.params.itemId, req.params.ingredientId);
+  res.status(200).json({ message: 'Ingredient detached.' });
+});
+
+export const listItemIngredients = asyncHandler(async (req, res) => {
+  const ingredients = await menuService.listItemIngredients(req.user.id, req.params.itemId);
+  res.status(200).json(ingredients);
+});

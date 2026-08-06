@@ -13,28 +13,14 @@ import {
   modifierOptionOverrideSchema,
   modifierOptionIdParamSchema,
   localItemModifierGroupParamSchema,
+  localItemIngredientParamSchema,
 } from './shopMenu.validation.js';
 import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
 
-/**
- * Mounted independently at /api/shops/:shopId/menu in app.js, same pattern
- * as rota/swap-requests/attendance (5.x) - NOT nested under shop.routes.js's
- * owner-only requireAuth, so staff sessions (a Manager, or an empowered
- * Shift Manager) can reach it.
- *
- * mergeParams: true required even for this top-level mount - verified
- * empirically in 4.5.
- *
- * Route shapes here (/overrides/:menuItemId, /items vs /items/:itemId) all
- * mirror patterns already proven safe in 6.1 and elsewhere - no new
- * collision class to re-verify (unlike 5.4's /comparison vs /:recordId,
- * which were both single-segment against the router root).
- */
 const router = Router({ mergeParams: true });
 
 router.use(requireStaffOrOwnerAuth);
 
-// The resolved, ready-to-use view - reads stay open to any in-scope actor.
 router.get('/', validateParams(shopIdOnlyParamSchema), shopMenuController.getResolvedMenu);
 
 router.patch(
@@ -49,8 +35,6 @@ router.delete(
   shopMenuController.clearOverride
 );
 
-// Variant overrides (6.3) - one level down from item overrides, same shape,
-// distinct static prefix so there's no ambiguity with /overrides/:menuItemId.
 router.patch(
   '/variants/:variantId',
   validateParams(variantIdParamSchema),
@@ -106,6 +90,19 @@ router.delete(
   '/items/:itemId/modifier-groups/:groupId',
   validateParams(localItemModifierGroupParamSchema),
   shopMenuController.detachModifierGroupFromLocalItem
+);
+
+// --- Ingredients / allergens (6.5) ---
+
+router.post(
+  '/items/:itemId/ingredients/:ingredientId',
+  validateParams(localItemIngredientParamSchema),
+  shopMenuController.attachIngredientToLocalItem
+);
+router.delete(
+  '/items/:itemId/ingredients/:ingredientId',
+  validateParams(localItemIngredientParamSchema),
+  shopMenuController.detachIngredientFromLocalItem
 );
 
 export default router;

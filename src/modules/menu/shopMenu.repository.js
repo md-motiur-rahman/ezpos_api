@@ -1,21 +1,11 @@
 import { query } from '../../db/pool.js';
-import { buildUpdateSet } from '../../utils/sql.js';
+import { buildUpdateSet, attachRelationship, detachRelationship } from '../../utils/sql.js';
 
 const OVERRIDE_COLUMNS = `id, shop_id, menu_item_id, is_enabled, price_override, created_at, updated_at`;
 const LOCAL_ITEM_COLUMNS = `id, shop_id, category_id, name, description, price, display_order, created_at, updated_at`;
 
 // --- Overrides ---
 
-/**
- * Native Postgres UPSERT (INSERT ... ON CONFLICT ... DO UPDATE) rather than
- * hand-rolled "look it up, then insert-or-update" application logic - the
- * unique constraint on (shop_id, menu_item_id) makes this the natural tool
- * for the job. Only the field(s) actually provided in this call are changed;
- * an omitted field keeps its current value on conflict (or the column
- * default on first insert) via COALESCE. Fully clearing an override back to
- * master defaults is DELETE's job, not this - so this never needs to
- * distinguish "clear this field" from "don't touch it".
- */
 export async function upsertOverride(shopId, menuItemId, { isEnabled, priceOverride }) {
   const { rows } = await query(
     `INSERT INTO shop_menu_item_overrides (shop_id, menu_item_id, is_enabled, price_override)
@@ -37,12 +27,6 @@ export async function deleteOverride(shopId, menuItemId) {
   ]);
 }
 
-/**
- * The resolved view: every active master item for the company, LEFT JOINed
- * against this shop's override (if any). COALESCE supplies master defaults
- * whenever no override row exists - a single query, not N+1 lookups or
- * app-level merging.
- */
 export async function listResolvedMasterItemsForShop(shopId, companyId) {
   const { rows } = await query(
     `SELECT mi.id, mi.category_id, mi.name, mi.description, mi.display_order,
@@ -115,7 +99,6 @@ export async function softDeleteLocalItem(id) {
 
 const VARIANT_OVERRIDE_COLUMNS = `id, shop_id, variant_id, is_enabled, price_override, created_at, updated_at`;
 
-/** Same native-upsert reasoning as upsertOverride above - just one level down, on variants. */
 export async function upsertVariantOverride(shopId, variantId, { isEnabled, priceOverride }) {
   const { rows } = await query(
     `INSERT INTO shop_menu_variant_overrides (shop_id, variant_id, is_enabled, price_override)
@@ -137,14 +120,6 @@ export async function deleteVariantOverride(shopId, variantId) {
   ]);
 }
 
-/**
- * Every active variant across every master item for the company, resolved
- * against this shop's overrides - same LEFT JOIN + COALESCE shape as
- * listResolvedMasterItemsForShop, one level down. Returned flat (tagged with
- * menu_item_id) rather than pre-grouped - the service layer groups these
- * onto their parent items, since that's a response-shaping concern, not a
- * data-fetching one.
- */
 export async function listResolvedVariantsForShop(shopId, companyId) {
   const { rows } = await query(
     `SELECT miv.id, miv.menu_item_id, miv.name, miv.display_order,
@@ -164,7 +139,6 @@ export async function listResolvedVariantsForShop(shopId, companyId) {
 
 // --- Modifier option overrides (6.4) ---
 
-/** Same native-upsert pattern as item/variant overrides - one level down again, on modifier options. */
 export async function upsertModifierOptionOverride(shopId, optionId, { isEnabled, priceDeltaOverride }) {
   const { rows } = await query(
     `INSERT INTO shop_menu_modifier_option_overrides (shop_id, modifier_option_id, is_enabled, price_delta_override)
@@ -186,12 +160,6 @@ export async function deleteModifierOptionOverride(shopId, optionId) {
   );
 }
 
-/**
- * Every modifier group+option attached to any MASTER item for the company,
- * resolved against this shop's option overrides - flat rows, same shape as
- * menu.repository.js's listAttachedModifierGroupsForItem, so
- * menuService.groupModifierRows() (6.4) groups both identically.
- */
 export async function listResolvedModifierGroupsForMasterItems(shopId, companyId) {
   const { rows } = await query(
     `SELECT mi.id AS item_id,
@@ -215,7 +183,6 @@ export async function listResolvedModifierGroupsForMasterItems(shopId, companyId
   return rows;
 }
 
-/** Same as above, one level down for LOCAL items - identically-shaped flat rows. */
 export async function listResolvedModifierGroupsForLocalItems(shopId) {
   const { rows } = await query(
     `SELECT smi.id AS item_id,
@@ -240,23 +207,85 @@ export async function listResolvedModifierGroupsForLocalItems(shopId) {
 
 // --- Modifier group <-> LOCAL item attachment ---
 
-/** Throws Postgres unique-violation (23505) if already attached - same as the master-item version. */
 export async function attachModifierGroupToLocalItem(shopMenuItemId, modifierGroupId) {
-  const { rows } = await query(
-    `INSERT INTO shop_menu_item_modifier_groups (shop_menu_item_id, modifier_group_id)
-     VALUES ($1, $2)
-     RETURNING id, shop_menu_item_id, modifier_group_id, created_at`,
-    [shopMenuItemId, modifierGroupId]
+  return attachRelationship(
+    'shop_menu_item_modifier_groups',
+    'shop_menu_item_id',
+    shopMenuItemId,
+    'modifier_group_id',
+    modifierGroupId
   );
-  return rows[0];
 }
 
 export async function detachModifierGroupFromLocalItem(shopMenuItemId, modifierGroupId) {
-  const { rows } = await query(
-    `DELETE FROM shop_menu_item_modifier_groups
-     WHERE shop_menu_item_id = $1 AND modifier_group_id = $2
-     RETURNING id`,
-    [shopMenuItemId, modifierGroupId]
+  return detachRelationship(
+    'shop_menu_item_modifier_groups',
+    'shop_menu_item_id',
+    shopMenuItemId,
+    'modifier_group_id',
+    modifierGroupId
   );
-  return rows[0] ?? null;
+}
+
+// --- Ingredients / allergens (6.5) ---
+
+export async function attachIngredientToLocalItem(shopMenuItemId, ingredientId) {
+  return attachRelationship(
+    'shop_menu_item_ingredients',
+    'shop_menu_item_id',
+    shopMenuItemId,
+    'ingredient_id',
+    ingredientId
+  );
+}
+
+export async function detachIngredientFromLocalItem(shopMenuItemId, ingredientId) {
+  return detachRelationship(
+    'shop_menu_item_ingredients',
+    'shop_menu_item_id',
+    shopMenuItemId,
+    'ingredient_id',
+    ingredientId
+  );
+}
+
+/**
+ * Every master item's aggregated allergen list for the company - each
+ * ingredient's `allergens` array is flattened with unnest() and re-unioned
+ * with array_agg(DISTINCT ... ORDER BY ...), so Postgres does the
+ * union-and-dedupe itself rather than fetching row-per-ingredient and
+ * aggregating in JS. Same "derive, don't store" philosophy as
+ * isBillingLocked (3.6) - nothing here is persisted, computed fresh every
+ * request. An item with zero ingredients (or whose only ingredients have no
+ * allergens) simply produces no row - the service layer defaults it to [].
+ * Empirically verified this query's union/dedupe behavior directly against
+ * Postgres before writing any code around it.
+ */
+export async function listAggregatedAllergensForMasterItems(companyId) {
+  const { rows } = await query(
+    `SELECT mi.id AS item_id, array_agg(DISTINCT allergen ORDER BY allergen) AS allergens
+     FROM menu_item_ingredients mii
+     JOIN menu_items mi ON mi.id = mii.menu_item_id AND mi.deleted_at IS NULL
+     JOIN menu_categories mc ON mc.id = mi.category_id AND mc.deleted_at IS NULL
+     JOIN ingredients i ON i.id = mii.ingredient_id AND i.deleted_at IS NULL,
+          unnest(i.allergens) AS allergen
+     WHERE mc.company_id = $1
+     GROUP BY mi.id`,
+    [companyId]
+  );
+  return rows;
+}
+
+export async function listAggregatedAllergensForLocalItems(shopId) {
+  const { rows } = await query(
+    `SELECT smi.id AS item_id, array_agg(DISTINCT allergen ORDER BY allergen) AS allergens
+     FROM shop_menu_item_ingredients smii
+     JOIN shop_menu_items smi ON smi.id = smii.shop_menu_item_id AND smi.deleted_at IS NULL
+     JOIN ingredients i ON i.id = smii.ingredient_id AND i.deleted_at IS NULL,
+          unnest(i.allergens) AS allergen
+     WHERE smi.shop_id = $1
+     GROUP BY smi.id`,
+    [shopId]
+  );
+  return rows;
 }

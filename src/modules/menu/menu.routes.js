@@ -19,6 +19,10 @@ import {
   updateModifierOptionSchema,
   modifierOptionIdParamSchema,
   itemModifierGroupParamSchema,
+  createIngredientSchema,
+  updateIngredientSchema,
+  ingredientIdParamSchema,
+  itemIngredientParamSchema,
 } from './menu.validation.js';
 
 /**
@@ -143,6 +147,42 @@ router.delete(
   '/menu-items/:itemId/modifier-groups/:groupId',
   validateParams(itemModifierGroupParamSchema),
   menuController.detachModifierGroupFromItem
+);
+
+// --- Ingredients / allergens (6.5) ---
+
+router.post(
+  '/ingredients',
+  validateBody(createIngredientSchema),
+  menuController.createIngredient
+);
+router.get('/ingredients', menuController.listIngredients);
+router.patch(
+  '/ingredients/:ingredientId',
+  validateParams(ingredientIdParamSchema),
+  validateBody(updateIngredientSchema),
+  menuController.updateIngredient
+);
+router.delete(
+  '/ingredients/:ingredientId',
+  validateParams(ingredientIdParamSchema),
+  menuController.deleteIngredient
+);
+
+router.post(
+  '/menu-items/:itemId/ingredients/:ingredientId',
+  validateParams(itemIngredientParamSchema),
+  menuController.attachIngredientToItem
+);
+router.get(
+  '/menu-items/:itemId/ingredients',
+  validateParams(itemIdParamSchema),
+  menuController.listItemIngredients
+);
+router.delete(
+  '/menu-items/:itemId/ingredients/:ingredientId',
+  validateParams(itemIngredientParamSchema),
+  menuController.detachIngredientFromItem
 );
 
 export default router;

@@ -20,6 +20,8 @@ function toItemResponse(item) {
     categoryId: item.category_id,
     name: item.name,
     description: item.description,
+    // pg returns NUMERIC columns as strings - convert to a real number,
+    // same pattern as shops.default_vat_rate.
     price: Number(item.price),
     displayOrder: item.display_order,
     createdAt: item.created_at,
@@ -376,4 +378,86 @@ export function groupModifierRows(rows) {
     result.set(itemId, Array.from(itemGroupsMap.values()));
   }
   return result;
+}
+
+// --- Ingredients / allergens (6.5) ---
+
+function toIngredientResponse(ingredient) {
+  return {
+    id: ingredient.id,
+    companyId: ingredient.company_id,
+    name: ingredient.name,
+    allergens: ingredient.allergens,
+    createdAt: ingredient.created_at,
+    updatedAt: ingredient.updated_at,
+  };
+}
+
+export async function createIngredient(ownerUserId, data) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  const ingredient = await menuRepository.createIngredient(company.id, data);
+  return toIngredientResponse(ingredient);
+}
+
+export async function listIngredients(ownerUserId) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  const ingredients = await menuRepository.listActiveIngredientsForCompany(company.id);
+  return ingredients.map(toIngredientResponse);
+}
+
+async function getIngredientOrThrow(companyId, ingredientId) {
+  const ingredient = await menuRepository.findActiveIngredientByIdForCompany(ingredientId, companyId);
+  if (!ingredient) {
+    throw new AppError('Ingredient not found', 404);
+  }
+  return ingredient;
+}
+
+export async function updateIngredient(ownerUserId, ingredientId, data) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getIngredientOrThrow(company.id, ingredientId);
+  const updated = await menuRepository.updateIngredient(ingredientId, data);
+  return toIngredientResponse(updated);
+}
+
+export async function deleteIngredient(ownerUserId, ingredientId) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getIngredientOrThrow(company.id, ingredientId);
+  await menuRepository.softDeleteIngredient(ingredientId);
+}
+
+// --- Attaching ingredients to a MASTER item's recipe ---
+
+export async function attachIngredientToItem(ownerUserId, itemId, ingredientId) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getItemOrThrow(company.id, itemId);
+  await getIngredientOrThrow(company.id, ingredientId);
+
+  try {
+    await menuRepository.attachIngredientToItem(itemId, ingredientId);
+  } catch (err) {
+    if (err.code === POSTGRES_UNIQUE_VIOLATION) {
+      throw new AppError('This ingredient is already attached to this item', 409);
+    }
+    throw err;
+  }
+}
+
+export async function detachIngredientFromItem(ownerUserId, itemId, ingredientId) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getItemOrThrow(company.id, itemId);
+  await getIngredientOrThrow(company.id, ingredientId);
+
+  const detached = await menuRepository.detachIngredientFromItem(itemId, ingredientId);
+  if (!detached) {
+    throw new AppError('This ingredient is not attached to this item', 404);
+  }
+}
+
+export async function listItemIngredients(ownerUserId, itemId) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getItemOrThrow(company.id, itemId);
+
+  const ingredients = await menuRepository.listAttachedIngredientsForItem(itemId);
+  return ingredients.map(toIngredientResponse);
 }

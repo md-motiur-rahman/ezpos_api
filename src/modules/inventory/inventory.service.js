@@ -31,12 +31,20 @@ async function requireManageInventory(actor, shopId) {
 }
 
 function toResponse(item) {
+  const lowStockThreshold =
+    item.low_stock_threshold === null ? null : Number(item.low_stock_threshold);
   return {
     id: item.id,
     shopId: item.shop_id,
     name: item.name,
     unit: item.unit,
     quantityOnHand: Number(item.quantity_on_hand),
+    lowStockThreshold,
+    // Computed, not stored - same "derive, don't store" philosophy as
+    // isBillingLocked (3.6). Always correct relative to the current
+    // quantityOnHand, no separate sync step needed. An item with no
+    // threshold configured is never low stock, regardless of quantity.
+    isLowStock: lowStockThreshold !== null && Number(item.quantity_on_hand) <= lowStockThreshold,
     createdAt: item.created_at,
     updatedAt: item.updated_at,
   };
@@ -48,9 +56,11 @@ export async function createItem(actor, shopId, data) {
   return toResponse(item);
 }
 
-export async function listItems(actor, shopId) {
+export async function listItems(actor, shopId, { lowStockOnly } = {}) {
   await requireViewInventory(actor, shopId);
-  const items = await inventoryRepository.listActiveItemsForShop(shopId);
+  const items = await inventoryRepository.listActiveItemsForShop(shopId, {
+    lowStockOnly: lowStockOnly === 'true',
+  });
   return items.map(toResponse);
 }
 

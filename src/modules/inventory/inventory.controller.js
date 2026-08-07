@@ -7,7 +7,7 @@ export const createItem = asyncHandler(async (req, res) => {
 });
 
 export const listItems = asyncHandler(async (req, res) => {
-  const items = await inventoryService.listItems(req.actor, req.params.shopId);
+  const items = await inventoryService.listItems(req.actor, req.params.shopId, req.query);
   res.status(200).json(items);
 });
 

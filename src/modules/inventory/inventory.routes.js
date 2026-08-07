@@ -1,11 +1,12 @@
 import { Router } from 'express';
 import { requireStaffOrOwnerAuth } from '../../middleware/requireStaffOrOwnerAuth.js';
-import { validateBody, validateParams } from '../../middleware/validate.js';
+import { validateBody, validateParams, validateQuery } from '../../middleware/validate.js';
 import * as inventoryController from './inventory.controller.js';
 import {
   createInventoryItemSchema,
   updateInventoryItemSchema,
   inventoryItemIdParamSchema,
+  inventoryListQuerySchema,
 } from './inventory.validation.js';
 import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
 
@@ -32,7 +33,12 @@ router.post(
   validateBody(createInventoryItemSchema),
   inventoryController.createItem
 );
-router.get('/', validateParams(shopIdOnlyParamSchema), inventoryController.listItems);
+router.get(
+  '/',
+  validateParams(shopIdOnlyParamSchema),
+  validateQuery(inventoryListQuerySchema),
+  inventoryController.listItems
+);
 router.get('/:itemId', validateParams(inventoryItemIdParamSchema), inventoryController.getItem);
 router.patch(
   '/:itemId',

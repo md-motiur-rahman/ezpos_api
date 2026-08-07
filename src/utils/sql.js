@@ -65,3 +65,38 @@ export async function detachRelationship(table, columnA, valueA, columnB, valueB
   );
   return rows[0] ?? null;
 }
+
+/**
+ * Same as attachRelationship, but for join tables that also carry one
+ * mutable data column beyond the two FK columns - shared by all three
+ * recipe-ingredient relationships in 7.2 (item, variant, and modifier
+ * option recipes) rather than three near-identical INSERTs. Deliberately a
+ * separate function from attachRelationship rather than an optional-extra-
+ * columns parameter on it - keeps the existing simple callers (6.4's
+ * modifier group attachment, which has no extra data) untouched and simple,
+ * rather than adding complexity they don't need.
+ *
+ * Throws Postgres unique-violation (23505) if the pair is already attached,
+ * same as attachRelationship - adjusting an existing attachment's quantity
+ * is updateRelationshipQuantity's job, not this one's.
+ */
+export async function attachRelationshipWithQuantity(table, columnA, valueA, columnB, valueB, quantity) {
+  const { rows } = await query(
+    `INSERT INTO ${table} (${columnA}, ${columnB}, quantity)
+     VALUES ($1, $2, $3)
+     RETURNING id, ${columnA}, ${columnB}, quantity, created_at, updated_at`,
+    [valueA, valueB, quantity]
+  );
+  return rows[0];
+}
+
+/** Adjusts just the quantity of an already-attached relationship, without detaching and reattaching. */
+export async function updateRelationshipQuantity(table, columnA, valueA, columnB, valueB, quantity) {
+  const { rows } = await query(
+    `UPDATE ${table} SET quantity = $3, updated_at = now()
+     WHERE ${columnA} = $1 AND ${columnB} = $2
+     RETURNING id, ${columnA}, ${columnB}, quantity, created_at, updated_at`,
+    [valueA, valueB, quantity]
+  );
+  return rows[0] ?? null;
+}

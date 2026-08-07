@@ -23,6 +23,9 @@ import {
   updateIngredientSchema,
   ingredientIdParamSchema,
   itemIngredientParamSchema,
+  recipeQuantitySchema,
+  variantIngredientParamSchema,
+  modifierOptionIngredientParamSchema,
 } from './menu.validation.js';
 
 /**
@@ -172,6 +175,7 @@ router.delete(
 router.post(
   '/menu-items/:itemId/ingredients/:ingredientId',
   validateParams(itemIngredientParamSchema),
+  validateBody(recipeQuantitySchema),
   menuController.attachIngredientToItem
 );
 router.get(
@@ -179,10 +183,66 @@ router.get(
   validateParams(itemIdParamSchema),
   menuController.listItemIngredients
 );
+router.patch(
+  '/menu-items/:itemId/ingredients/:ingredientId',
+  validateParams(itemIngredientParamSchema),
+  validateBody(recipeQuantitySchema),
+  menuController.updateItemIngredientQuantity
+);
 router.delete(
   '/menu-items/:itemId/ingredients/:ingredientId',
   validateParams(itemIngredientParamSchema),
   menuController.detachIngredientFromItem
+);
+
+// --- Variant recipes (7.2) ---
+
+router.post(
+  '/menu-items/:itemId/variants/:variantId/ingredients/:ingredientId',
+  validateParams(variantIngredientParamSchema),
+  validateBody(recipeQuantitySchema),
+  menuController.attachIngredientToVariant
+);
+router.get(
+  '/menu-items/:itemId/variants/:variantId/ingredients',
+  validateParams(variantIdParamSchema),
+  menuController.listVariantIngredients
+);
+router.patch(
+  '/menu-items/:itemId/variants/:variantId/ingredients/:ingredientId',
+  validateParams(variantIngredientParamSchema),
+  validateBody(recipeQuantitySchema),
+  menuController.updateVariantIngredientQuantity
+);
+router.delete(
+  '/menu-items/:itemId/variants/:variantId/ingredients/:ingredientId',
+  validateParams(variantIngredientParamSchema),
+  menuController.detachIngredientFromVariant
+);
+
+// --- Modifier option recipes (7.2) ---
+
+router.post(
+  '/modifier-groups/:groupId/options/:optionId/ingredients/:ingredientId',
+  validateParams(modifierOptionIngredientParamSchema),
+  validateBody(recipeQuantitySchema),
+  menuController.attachIngredientToModifierOption
+);
+router.get(
+  '/modifier-groups/:groupId/options/:optionId/ingredients',
+  validateParams(modifierOptionIdParamSchema),
+  menuController.listModifierOptionIngredients
+);
+router.patch(
+  '/modifier-groups/:groupId/options/:optionId/ingredients/:ingredientId',
+  validateParams(modifierOptionIngredientParamSchema),
+  validateBody(recipeQuantitySchema),
+  menuController.updateModifierOptionIngredientQuantity
+);
+router.delete(
+  '/modifier-groups/:groupId/options/:optionId/ingredients/:ingredientId',
+  validateParams(modifierOptionIngredientParamSchema),
+  menuController.detachIngredientFromModifierOption
 );
 
 export default router;

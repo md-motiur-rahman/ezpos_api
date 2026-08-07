@@ -121,11 +121,15 @@ export const itemModifierGroupParamSchema = z.object({
 
 export const createIngredientSchema = z.object({
   name: z.string().trim().min(1, 'Ingredient name is required'),
+  // Required from 7.2 onward - a recipe quantity is meaningless without
+  // knowing the unit it's measured in.
+  unit: z.string().trim().min(1, 'Unit is required'),
   allergens: z.array(z.enum(ALLERGENS)).optional(),
 });
 
 export const updateIngredientSchema = z.object({
   name: z.string().trim().min(1, 'Ingredient name is required').optional(),
+  unit: z.string().trim().min(1, 'Unit is required').optional(),
   allergens: z.array(z.enum(ALLERGENS)).optional(),
 });
 
@@ -135,5 +139,27 @@ export const ingredientIdParamSchema = z.object({
 
 export const itemIngredientParamSchema = z.object({
   itemId: z.string().uuid('Invalid item id'),
+  ingredientId: z.string().uuid('Invalid ingredient id'),
+});
+
+// --- Recipe linking (7.2) ---
+
+// Shared by every "attach an ingredient with a quantity" / "adjust just the
+// quantity" endpoint - item, variant, and modifier option recipes all need
+// the exact same single-field body, so this is reused across all three
+// rather than redefined three times.
+export const recipeQuantitySchema = z.object({
+  quantity: z.number().positive('quantity must be greater than 0'),
+});
+
+export const variantIngredientParamSchema = z.object({
+  itemId: z.string().uuid('Invalid item id'),
+  variantId: z.string().uuid('Invalid variant id'),
+  ingredientId: z.string().uuid('Invalid ingredient id'),
+});
+
+export const modifierOptionIngredientParamSchema = z.object({
+  groupId: z.string().uuid('Invalid modifier group id'),
+  optionId: z.string().uuid('Invalid modifier option id'),
   ingredientId: z.string().uuid('Invalid ingredient id'),
 });

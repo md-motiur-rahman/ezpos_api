@@ -380,16 +380,30 @@ export function groupModifierRows(rows) {
   return result;
 }
 
-// --- Ingredients / allergens (6.5) ---
+// --- Ingredients / allergens (6.5, extended by 7.2) ---
 
 function toIngredientResponse(ingredient) {
   return {
     id: ingredient.id,
     companyId: ingredient.company_id,
     name: ingredient.name,
+    unit: ingredient.unit,
     allergens: ingredient.allergens,
     createdAt: ingredient.created_at,
     updatedAt: ingredient.updated_at,
+  };
+}
+
+/**
+ * Shared by every "list ingredients for a recipe" response (item, variant,
+ * modifier option) - the ingredient's own fields plus the recipe-specific
+ * quantity for this particular parent, rather than three near-identical
+ * mappers.
+ */
+function toRecipeIngredientResponse(row) {
+  return {
+    ...toIngredientResponse(row),
+    quantity: Number(row.quantity),
   };
 }
 
@@ -426,20 +440,32 @@ export async function deleteIngredient(ownerUserId, ingredientId) {
   await menuRepository.softDeleteIngredient(ingredientId);
 }
 
-// --- Attaching ingredients to a MASTER item's recipe ---
+// --- Attaching ingredients to a MASTER item's recipe (7.2 adds quantity) ---
 
-export async function attachIngredientToItem(ownerUserId, itemId, ingredientId) {
+export async function attachIngredientToItem(ownerUserId, itemId, ingredientId, quantity) {
   const company = await getActiveCompanyOrThrow(ownerUserId);
   await getItemOrThrow(company.id, itemId);
   await getIngredientOrThrow(company.id, ingredientId);
 
   try {
-    await menuRepository.attachIngredientToItem(itemId, ingredientId);
+    await menuRepository.attachIngredientToItem(itemId, ingredientId, quantity);
   } catch (err) {
     if (err.code === POSTGRES_UNIQUE_VIOLATION) {
       throw new AppError('This ingredient is already attached to this item', 409);
     }
     throw err;
+  }
+}
+
+/** Adjusts an already-attached ingredient's recipe quantity without detaching and reattaching. */
+export async function updateItemIngredientQuantity(ownerUserId, itemId, ingredientId, quantity) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getItemOrThrow(company.id, itemId);
+  await getIngredientOrThrow(company.id, ingredientId);
+
+  const updated = await menuRepository.updateItemIngredientQuantity(itemId, ingredientId, quantity);
+  if (!updated) {
+    throw new AppError('This ingredient is not attached to this item', 404);
   }
 }
 
@@ -459,5 +485,133 @@ export async function listItemIngredients(ownerUserId, itemId) {
   await getItemOrThrow(company.id, itemId);
 
   const ingredients = await menuRepository.listAttachedIngredientsForItem(itemId);
-  return ingredients.map(toIngredientResponse);
+  return ingredients.map(toRecipeIngredientResponse);
+}
+
+// --- Attaching ingredients to a VARIANT's own recipe (7.2) ---
+
+export async function attachIngredientToVariant(ownerUserId, itemId, variantId, ingredientId, quantity) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getItemOrThrow(company.id, itemId);
+  await getVariantOrThrow(itemId, variantId);
+  await getIngredientOrThrow(company.id, ingredientId);
+
+  try {
+    await menuRepository.attachIngredientToVariant(variantId, ingredientId, quantity);
+  } catch (err) {
+    if (err.code === POSTGRES_UNIQUE_VIOLATION) {
+      throw new AppError('This ingredient is already attached to this variant', 409);
+    }
+    throw err;
+  }
+}
+
+export async function updateVariantIngredientQuantity(
+  ownerUserId,
+  itemId,
+  variantId,
+  ingredientId,
+  quantity
+) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getItemOrThrow(company.id, itemId);
+  await getVariantOrThrow(itemId, variantId);
+  await getIngredientOrThrow(company.id, ingredientId);
+
+  const updated = await menuRepository.updateVariantIngredientQuantity(
+    variantId,
+    ingredientId,
+    quantity
+  );
+  if (!updated) {
+    throw new AppError('This ingredient is not attached to this variant', 404);
+  }
+}
+
+export async function detachIngredientFromVariant(ownerUserId, itemId, variantId, ingredientId) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getItemOrThrow(company.id, itemId);
+  await getVariantOrThrow(itemId, variantId);
+  await getIngredientOrThrow(company.id, ingredientId);
+
+  const detached = await menuRepository.detachIngredientFromVariant(variantId, ingredientId);
+  if (!detached) {
+    throw new AppError('This ingredient is not attached to this variant', 404);
+  }
+}
+
+export async function listVariantIngredients(ownerUserId, itemId, variantId) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getItemOrThrow(company.id, itemId);
+  await getVariantOrThrow(itemId, variantId);
+
+  const ingredients = await menuRepository.listAttachedIngredientsForVariant(variantId);
+  return ingredients.map(toRecipeIngredientResponse);
+}
+
+// --- Attaching ingredients to a MODIFIER OPTION's own recipe (7.2) ---
+
+export async function attachIngredientToModifierOption(
+  ownerUserId,
+  groupId,
+  optionId,
+  ingredientId,
+  quantity
+) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getModifierGroupOrThrow(company.id, groupId);
+  await getModifierOptionOrThrow(groupId, optionId);
+  await getIngredientOrThrow(company.id, ingredientId);
+
+  try {
+    await menuRepository.attachIngredientToModifierOption(optionId, ingredientId, quantity);
+  } catch (err) {
+    if (err.code === POSTGRES_UNIQUE_VIOLATION) {
+      throw new AppError('This ingredient is already attached to this modifier option', 409);
+    }
+    throw err;
+  }
+}
+
+export async function updateModifierOptionIngredientQuantity(
+  ownerUserId,
+  groupId,
+  optionId,
+  ingredientId,
+  quantity
+) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getModifierGroupOrThrow(company.id, groupId);
+  await getModifierOptionOrThrow(groupId, optionId);
+  await getIngredientOrThrow(company.id, ingredientId);
+
+  const updated = await menuRepository.updateModifierOptionIngredientQuantity(
+    optionId,
+    ingredientId,
+    quantity
+  );
+  if (!updated) {
+    throw new AppError('This ingredient is not attached to this modifier option', 404);
+  }
+}
+
+export async function detachIngredientFromModifierOption(ownerUserId, groupId, optionId, ingredientId) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getModifierGroupOrThrow(company.id, groupId);
+  await getModifierOptionOrThrow(groupId, optionId);
+  await getIngredientOrThrow(company.id, ingredientId);
+
+  const detached = await menuRepository.detachIngredientFromModifierOption(optionId, ingredientId);
+  if (!detached) {
+    throw new AppError('This ingredient is not attached to this modifier option', 404);
+  }
+}
+
+export async function listModifierOptionIngredients(ownerUserId, groupId, optionId) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  await getModifierGroupOrThrow(company.id, groupId);
+  await getModifierOptionOrThrow(groupId, optionId);
+
+  const ingredients = await menuRepository.listAttachedIngredientsForModifierOption(optionId);
+  return ingredients.map(toRecipeIngredientResponse);
 }

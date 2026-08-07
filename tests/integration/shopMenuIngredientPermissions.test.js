@@ -72,7 +72,7 @@ async function createLocalItemAndIngredient(header, shopId) {
   const ingredient = await request(app)
     .post('/api/companies/mine/ingredients')
     .set('Authorization', header)
-    .send({ name: 'Sauce', allergens: ['soybeans'] });
+    .send({ name: 'Sauce', unit: 'ml', allergens: ['soybeans'] });
   return { item: item.body, ingredient: ingredient.body };
 }
 
@@ -102,7 +102,8 @@ test('a Manager can attach an ingredient to a local item', async () => {
 
   const res = await request(app)
     .post(`/api/shops/${shopId}/menu/items/${item.id}/ingredients/${ingredient.id}`)
-    .set('Authorization', managerHeader);
+    .set('Authorization', managerHeader)
+    .send({ quantity: 20 });
 
   assert.equal(res.status, 201);
 });
@@ -115,7 +116,8 @@ test('a Server cannot attach an ingredient to a local item, but can still read t
 
   const attachRes = await request(app)
     .post(`/api/shops/${shopId}/menu/items/${item.id}/ingredients/${ingredient.id}`)
-    .set('Authorization', serverHeader);
+    .set('Authorization', serverHeader)
+    .send({ quantity: 20 });
   assert.equal(attachRes.status, 403);
 
   const getRes = await request(app).get(`/api/shops/${shopId}/menu`).set('Authorization', serverHeader);

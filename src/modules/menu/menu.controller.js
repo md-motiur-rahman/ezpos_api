@@ -135,7 +135,7 @@ export const listItemModifierGroups = asyncHandler(async (req, res) => {
   res.status(200).json(groups);
 });
 
-// --- Ingredients / allergens (6.5) ---
+// --- Ingredients / allergens (6.5, extended by 7.2) ---
 
 export const createIngredient = asyncHandler(async (req, res) => {
   const ingredient = await menuService.createIngredient(req.user.id, req.body);
@@ -158,8 +158,23 @@ export const deleteIngredient = asyncHandler(async (req, res) => {
 });
 
 export const attachIngredientToItem = asyncHandler(async (req, res) => {
-  await menuService.attachIngredientToItem(req.user.id, req.params.itemId, req.params.ingredientId);
+  await menuService.attachIngredientToItem(
+    req.user.id,
+    req.params.itemId,
+    req.params.ingredientId,
+    req.body.quantity
+  );
   res.status(201).json({ message: 'Ingredient attached.' });
+});
+
+export const updateItemIngredientQuantity = asyncHandler(async (req, res) => {
+  await menuService.updateItemIngredientQuantity(
+    req.user.id,
+    req.params.itemId,
+    req.params.ingredientId,
+    req.body.quantity
+  );
+  res.status(200).json({ message: 'Ingredient quantity updated.' });
 });
 
 export const detachIngredientFromItem = asyncHandler(async (req, res) => {
@@ -169,5 +184,91 @@ export const detachIngredientFromItem = asyncHandler(async (req, res) => {
 
 export const listItemIngredients = asyncHandler(async (req, res) => {
   const ingredients = await menuService.listItemIngredients(req.user.id, req.params.itemId);
+  res.status(200).json(ingredients);
+});
+
+// --- Variant recipes (7.2) ---
+
+export const attachIngredientToVariant = asyncHandler(async (req, res) => {
+  await menuService.attachIngredientToVariant(
+    req.user.id,
+    req.params.itemId,
+    req.params.variantId,
+    req.params.ingredientId,
+    req.body.quantity
+  );
+  res.status(201).json({ message: 'Ingredient attached.' });
+});
+
+export const updateVariantIngredientQuantity = asyncHandler(async (req, res) => {
+  await menuService.updateVariantIngredientQuantity(
+    req.user.id,
+    req.params.itemId,
+    req.params.variantId,
+    req.params.ingredientId,
+    req.body.quantity
+  );
+  res.status(200).json({ message: 'Ingredient quantity updated.' });
+});
+
+export const detachIngredientFromVariant = asyncHandler(async (req, res) => {
+  await menuService.detachIngredientFromVariant(
+    req.user.id,
+    req.params.itemId,
+    req.params.variantId,
+    req.params.ingredientId
+  );
+  res.status(200).json({ message: 'Ingredient detached.' });
+});
+
+export const listVariantIngredients = asyncHandler(async (req, res) => {
+  const ingredients = await menuService.listVariantIngredients(
+    req.user.id,
+    req.params.itemId,
+    req.params.variantId
+  );
+  res.status(200).json(ingredients);
+});
+
+// --- Modifier option recipes (7.2) ---
+
+export const attachIngredientToModifierOption = asyncHandler(async (req, res) => {
+  await menuService.attachIngredientToModifierOption(
+    req.user.id,
+    req.params.groupId,
+    req.params.optionId,
+    req.params.ingredientId,
+    req.body.quantity
+  );
+  res.status(201).json({ message: 'Ingredient attached.' });
+});
+
+export const updateModifierOptionIngredientQuantity = asyncHandler(async (req, res) => {
+  await menuService.updateModifierOptionIngredientQuantity(
+    req.user.id,
+    req.params.groupId,
+    req.params.optionId,
+    req.params.ingredientId,
+    req.body.quantity
+  );
+  res.status(200).json({ message: 'Ingredient quantity updated.' });
+});
+
+export const detachIngredientFromModifierOption = asyncHandler(async (req, res) => {
+  await menuService.detachIngredientFromModifierOption(
+    req.user.id,
+    req.params.groupId,
+    req.params.optionId,
+    req.params.ingredientId
+  );
+  res.status(200).json({ message: 'Ingredient detached.' });
+});
+
+export const listModifierOptionIngredients = asyncHandler(async (req, res) => {
+  const ingredients = await menuService.listModifierOptionIngredients(
+    req.user.id,
+    req.params.groupId,
+    req.params.optionId
+  );
   res.status(200).json(ingredients);
 });

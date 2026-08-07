@@ -1,5 +1,11 @@
 import { query } from '../../db/pool.js';
-import { buildUpdateSet, attachRelationship, detachRelationship } from '../../utils/sql.js';
+import {
+  buildUpdateSet,
+  attachRelationship,
+  detachRelationship,
+  attachRelationshipWithQuantity,
+  updateRelationshipQuantity,
+} from '../../utils/sql.js';
 
 const CATEGORY_COLUMNS = `id, company_id, name, display_order, is_active, created_at, updated_at`;
 const ITEM_COLUMNS = `id, category_id, name, description, price, display_order, created_at, updated_at`;
@@ -369,16 +375,16 @@ export async function listAttachedModifierGroupsForItem(menuItemId) {
   return rows;
 }
 
-// --- Ingredients / allergens (6.5) ---
+// --- Ingredients / allergens (6.5, extended by 7.2 with unit) ---
 
-const INGREDIENT_COLUMNS = `id, company_id, name, allergens, created_at, updated_at`;
+const INGREDIENT_COLUMNS = `id, company_id, name, unit, allergens, created_at, updated_at`;
 
-export async function createIngredient(companyId, { name, allergens }) {
+export async function createIngredient(companyId, { name, unit, allergens }) {
   const { rows } = await query(
-    `INSERT INTO ingredients (company_id, name, allergens)
-     VALUES ($1, $2, $3)
+    `INSERT INTO ingredients (company_id, name, unit, allergens)
+     VALUES ($1, $2, $3, $4)
      RETURNING ${INGREDIENT_COLUMNS}`,
-    [companyId, name, allergens ?? []]
+    [companyId, name, unit, allergens ?? []]
   );
   return rows[0];
 }
@@ -403,7 +409,7 @@ export async function findActiveIngredientByIdForCompany(id, companyId) {
 }
 
 export async function updateIngredient(id, data) {
-  const fieldMap = { name: 'name', allergens: 'allergens' };
+  const fieldMap = { name: 'name', unit: 'unit', allergens: 'allergens' };
   const { clause, values } = buildUpdateSet(fieldMap, data);
   values.push(id);
   const { rows } = await query(
@@ -420,13 +426,26 @@ export async function softDeleteIngredient(id) {
 // --- Ingredient <-> MASTER item attachment (the item's "recipe") ---
 
 /** Throws Postgres unique-violation (23505) if this ingredient is already attached to this item. */
-export async function attachIngredientToItem(menuItemId, ingredientId) {
-  return attachRelationship(
+export async function attachIngredientToItem(menuItemId, ingredientId, quantity) {
+  return attachRelationshipWithQuantity(
     'menu_item_ingredients',
     'menu_item_id',
     menuItemId,
     'ingredient_id',
-    ingredientId
+    ingredientId,
+    quantity
+  );
+}
+
+/** Adjusts just the quantity of an already-attached ingredient, without detaching and reattaching. */
+export async function updateItemIngredientQuantity(menuItemId, ingredientId, quantity) {
+  return updateRelationshipQuantity(
+    'menu_item_ingredients',
+    'menu_item_id',
+    menuItemId,
+    'ingredient_id',
+    ingredientId,
+    quantity
   );
 }
 
@@ -440,14 +459,112 @@ export async function detachIngredientFromItem(menuItemId, ingredientId) {
   );
 }
 
+/** Each row is the ingredient's own fields plus this item's recipe quantity for it. */
 export async function listAttachedIngredientsForItem(menuItemId) {
   const { rows } = await query(
-    `SELECT i.id, i.company_id, i.name, i.allergens, i.created_at, i.updated_at
+    `SELECT i.id, i.company_id, i.name, i.unit, i.allergens, i.created_at, i.updated_at,
+            mii.quantity
      FROM menu_item_ingredients mii
      JOIN ingredients i ON i.id = mii.ingredient_id AND i.deleted_at IS NULL
      WHERE mii.menu_item_id = $1
      ORDER BY i.name`,
     [menuItemId]
+  );
+  return rows;
+}
+
+// --- Ingredient <-> VARIANT attachment (a variant's own recipe) ---
+
+/** Throws Postgres unique-violation (23505) if this ingredient is already attached to this variant. */
+export async function attachIngredientToVariant(variantId, ingredientId, quantity) {
+  return attachRelationshipWithQuantity(
+    'menu_item_variant_ingredients',
+    'variant_id',
+    variantId,
+    'ingredient_id',
+    ingredientId,
+    quantity
+  );
+}
+
+export async function updateVariantIngredientQuantity(variantId, ingredientId, quantity) {
+  return updateRelationshipQuantity(
+    'menu_item_variant_ingredients',
+    'variant_id',
+    variantId,
+    'ingredient_id',
+    ingredientId,
+    quantity
+  );
+}
+
+export async function detachIngredientFromVariant(variantId, ingredientId) {
+  return detachRelationship(
+    'menu_item_variant_ingredients',
+    'variant_id',
+    variantId,
+    'ingredient_id',
+    ingredientId
+  );
+}
+
+export async function listAttachedIngredientsForVariant(variantId) {
+  const { rows } = await query(
+    `SELECT i.id, i.company_id, i.name, i.unit, i.allergens, i.created_at, i.updated_at,
+            miv.quantity
+     FROM menu_item_variant_ingredients miv
+     JOIN ingredients i ON i.id = miv.ingredient_id AND i.deleted_at IS NULL
+     WHERE miv.variant_id = $1
+     ORDER BY i.name`,
+    [variantId]
+  );
+  return rows;
+}
+
+// --- Ingredient <-> MODIFIER OPTION attachment (an option's own recipe) ---
+
+/** Throws Postgres unique-violation (23505) if this ingredient is already attached to this option. */
+export async function attachIngredientToModifierOption(optionId, ingredientId, quantity) {
+  return attachRelationshipWithQuantity(
+    'modifier_option_ingredients',
+    'modifier_option_id',
+    optionId,
+    'ingredient_id',
+    ingredientId,
+    quantity
+  );
+}
+
+export async function updateModifierOptionIngredientQuantity(optionId, ingredientId, quantity) {
+  return updateRelationshipQuantity(
+    'modifier_option_ingredients',
+    'modifier_option_id',
+    optionId,
+    'ingredient_id',
+    ingredientId,
+    quantity
+  );
+}
+
+export async function detachIngredientFromModifierOption(optionId, ingredientId) {
+  return detachRelationship(
+    'modifier_option_ingredients',
+    'modifier_option_id',
+    optionId,
+    'ingredient_id',
+    ingredientId
+  );
+}
+
+export async function listAttachedIngredientsForModifierOption(optionId) {
+  const { rows } = await query(
+    `SELECT i.id, i.company_id, i.name, i.unit, i.allergens, i.created_at, i.updated_at,
+            moi.quantity
+     FROM modifier_option_ingredients moi
+     JOIN ingredients i ON i.id = moi.ingredient_id AND i.deleted_at IS NULL
+     WHERE moi.modifier_option_id = $1
+     ORDER BY i.name`,
+    [optionId]
   );
   return rows;
 }

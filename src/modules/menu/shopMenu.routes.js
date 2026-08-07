@@ -15,12 +15,23 @@ import {
   localItemModifierGroupParamSchema,
   localItemIngredientParamSchema,
 } from './shopMenu.validation.js';
+import { recipeQuantitySchema } from './menu.validation.js';
 import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
 
+/**
+ * Mounted independently at /api/shops/:shopId/menu in app.js, same pattern
+ * as rota/swap-requests/attendance (5.x) - NOT nested under shop.routes.js's
+ * owner-only requireAuth, so staff sessions (a Manager, or an empowered
+ * Shift Manager) can reach it.
+ *
+ * mergeParams: true required even for this top-level mount - verified
+ * empirically in 4.5.
+ */
 const router = Router({ mergeParams: true });
 
 router.use(requireStaffOrOwnerAuth);
 
+// The resolved, ready-to-use view - reads stay open to any in-scope actor.
 router.get('/', validateParams(shopIdOnlyParamSchema), shopMenuController.getResolvedMenu);
 
 router.patch(
@@ -35,6 +46,8 @@ router.delete(
   shopMenuController.clearOverride
 );
 
+// Variant overrides (6.3) - one level down from item overrides, same shape,
+// distinct static prefix so there's no ambiguity with /overrides/:menuItemId.
 router.patch(
   '/variants/:variantId',
   validateParams(variantIdParamSchema),
@@ -92,12 +105,24 @@ router.delete(
   shopMenuController.detachModifierGroupFromLocalItem
 );
 
-// --- Ingredients / allergens (6.5) ---
+// --- Ingredients / allergens (6.5, extended by 7.2) ---
 
 router.post(
   '/items/:itemId/ingredients/:ingredientId',
   validateParams(localItemIngredientParamSchema),
+  validateBody(recipeQuantitySchema),
   shopMenuController.attachIngredientToLocalItem
+);
+router.get(
+  '/items/:itemId/ingredients',
+  validateParams(localItemIdParamSchema),
+  shopMenuController.listLocalItemIngredients
+);
+router.patch(
+  '/items/:itemId/ingredients/:ingredientId',
+  validateParams(localItemIngredientParamSchema),
+  validateBody(recipeQuantitySchema),
+  shopMenuController.updateLocalItemIngredientQuantity
 );
 router.delete(
   '/items/:itemId/ingredients/:ingredientId',

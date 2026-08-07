@@ -58,11 +58,11 @@ async function setupOwnerWithShop() {
   return { header, shopId: shopRes.body.id };
 }
 
-async function createIngredient(header, name, allergens) {
+async function createIngredient(header, name, unit, allergens) {
   const res = await request(app)
     .post('/api/companies/mine/ingredients')
     .set('Authorization', header)
-    .send({ name, allergens });
+    .send({ name, unit, allergens });
   return res.body;
 }
 
@@ -78,14 +78,16 @@ test('GET /menu unions allergens from two ingredients with an overlapping allerg
     .post('/api/companies/mine/menu-items')
     .set('Authorization', header)
     .send({ categoryId: category.body.id, name: 'Chicken Wrap', price: 5.99 });
-  const flour = await createIngredient(header, 'Wheat Flour', ['gluten']);
-  const milk = await createIngredient(header, 'Milk', ['milk', 'gluten']);
+  const flour = await createIngredient(header, 'Wheat Flour', 'kg', ['gluten']);
+  const milk = await createIngredient(header, 'Milk', 'L', ['milk', 'gluten']);
   await request(app)
     .post(`/api/companies/mine/menu-items/${item.body.id}/ingredients/${flour.id}`)
-    .set('Authorization', header);
+    .set('Authorization', header)
+    .send({ quantity: 0.15 });
   await request(app)
     .post(`/api/companies/mine/menu-items/${item.body.id}/ingredients/${milk.id}`)
-    .set('Authorization', header);
+    .set('Authorization', header)
+    .send({ quantity: 0.05 });
 
   const res = await request(app).get(`/api/shops/${shopId}/menu`).set('Authorization', header);
 
@@ -119,10 +121,11 @@ test('an item whose only ingredient has no allergens gets an empty allergens arr
     .post('/api/companies/mine/menu-items')
     .set('Authorization', header)
     .send({ categoryId: category.body.id, name: 'Fries', price: 2.5 });
-  const water = await createIngredient(header, 'Water', []);
+  const water = await createIngredient(header, 'Water', 'L', []);
   await request(app)
     .post(`/api/companies/mine/menu-items/${item.body.id}/ingredients/${water.id}`)
-    .set('Authorization', header);
+    .set('Authorization', header)
+    .send({ quantity: 0.1 });
 
   const res = await request(app).get(`/api/shops/${shopId}/menu`).set('Authorization', header);
 
@@ -132,7 +135,7 @@ test('an item whose only ingredient has no allergens gets an empty allergens arr
 
 // --- Attach / detach to a LOCAL item's recipe, and resolved allergens on local items ---
 
-test('POST attaches an ingredient to a local item', async () => {
+test('POST attaches an ingredient to a local item with a quantity', async () => {
   const { header, shopId } = await setupOwnerWithShop();
   const category = await request(app)
     .post('/api/companies/mine/menu-categories')
@@ -142,11 +145,12 @@ test('POST attaches an ingredient to a local item', async () => {
     .post(`/api/shops/${shopId}/menu/items`)
     .set('Authorization', header)
     .send({ categoryId: category.body.id, name: 'Chicken Wrap', price: 5.99 });
-  const ingredient = await createIngredient(header, 'Sweet Chilli Sauce', ['soybeans']);
+  const ingredient = await createIngredient(header, 'Sweet Chilli Sauce', 'ml', ['soybeans']);
 
   const res = await request(app)
     .post(`/api/shops/${shopId}/menu/items/${item.body.id}/ingredients/${ingredient.id}`)
-    .set('Authorization', header);
+    .set('Authorization', header)
+    .send({ quantity: 20 });
 
   assert.equal(res.status, 201);
 });
@@ -162,11 +166,12 @@ test('attaching a foreign-company ingredient to a local item returns 404', async
     .set('Authorization', ownerA.header)
     .send({ categoryId: category.body.id, name: 'Wrap', price: 5.99 });
   const ownerB = await setupOwnerWithShop();
-  const ingredientB = await createIngredient(ownerB.header, 'Sauce', []);
+  const ingredientB = await createIngredient(ownerB.header, 'Sauce', 'ml', []);
 
   const res = await request(app)
     .post(`/api/shops/${ownerA.shopId}/menu/items/${item.body.id}/ingredients/${ingredientB.id}`)
-    .set('Authorization', ownerA.header);
+    .set('Authorization', ownerA.header)
+    .send({ quantity: 20 });
 
   assert.equal(res.status, 404);
 });
@@ -181,20 +186,51 @@ test('GET /menu aggregates allergens on the West London wrap (local item) case',
     .post(`/api/shops/${shopId}/menu/items`)
     .set('Authorization', header)
     .send({ categoryId: category.body.id, name: 'Chicken Wrap', price: 5.99 });
-  const soy = await createIngredient(header, 'Sweet Chilli Sauce', ['soybeans']);
-  const sesame = await createIngredient(header, 'Sesame Seeds', ['sesame']);
+  const soy = await createIngredient(header, 'Sweet Chilli Sauce', 'ml', ['soybeans']);
+  const sesame = await createIngredient(header, 'Sesame Seeds', 'g', ['sesame']);
   await request(app)
     .post(`/api/shops/${shopId}/menu/items/${item.body.id}/ingredients/${soy.id}`)
-    .set('Authorization', header);
+    .set('Authorization', header)
+    .send({ quantity: 20 });
   await request(app)
     .post(`/api/shops/${shopId}/menu/items/${item.body.id}/ingredients/${sesame.id}`)
-    .set('Authorization', header);
+    .set('Authorization', header)
+    .send({ quantity: 5 });
 
   const res = await request(app).get(`/api/shops/${shopId}/menu`).set('Authorization', header);
 
   const resolvedItem = res.body.find((entry) => entry.id === item.body.id);
   assert.equal(resolvedItem.source, 'local');
   assert.deepEqual(resolvedItem.allergens, ['sesame', 'soybeans']);
+});
+
+test('PATCH adjusts a local item ingredient\'s quantity without detaching', async () => {
+  const { header, shopId } = await setupOwnerWithShop();
+  const category = await request(app)
+    .post('/api/companies/mine/menu-categories')
+    .set('Authorization', header)
+    .send({ name: 'Mains' });
+  const item = await request(app)
+    .post(`/api/shops/${shopId}/menu/items`)
+    .set('Authorization', header)
+    .send({ categoryId: category.body.id, name: 'Wrap', price: 5.99 });
+  const ingredient = await createIngredient(header, 'Sauce', 'ml', []);
+  await request(app)
+    .post(`/api/shops/${shopId}/menu/items/${item.body.id}/ingredients/${ingredient.id}`)
+    .set('Authorization', header)
+    .send({ quantity: 20 });
+
+  const res = await request(app)
+    .patch(`/api/shops/${shopId}/menu/items/${item.body.id}/ingredients/${ingredient.id}`)
+    .set('Authorization', header)
+    .send({ quantity: 30 });
+
+  assert.equal(res.status, 200);
+
+  const listRes = await request(app)
+    .get(`/api/shops/${shopId}/menu/items/${item.body.id}/ingredients`)
+    .set('Authorization', header);
+  assert.equal(listRes.body[0].quantity, 30);
 });
 
 test('DELETE detaches an ingredient from a local item', async () => {
@@ -207,10 +243,11 @@ test('DELETE detaches an ingredient from a local item', async () => {
     .post(`/api/shops/${shopId}/menu/items`)
     .set('Authorization', header)
     .send({ categoryId: category.body.id, name: 'Wrap', price: 5.99 });
-  const ingredient = await createIngredient(header, 'Sauce', ['soybeans']);
+  const ingredient = await createIngredient(header, 'Sauce', 'ml', ['soybeans']);
   await request(app)
     .post(`/api/shops/${shopId}/menu/items/${item.body.id}/ingredients/${ingredient.id}`)
-    .set('Authorization', header);
+    .set('Authorization', header)
+    .send({ quantity: 20 });
 
   const res = await request(app)
     .delete(`/api/shops/${shopId}/menu/items/${item.body.id}/ingredients/${ingredient.id}`)

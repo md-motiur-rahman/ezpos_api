@@ -1,5 +1,11 @@
 import { query } from '../../db/pool.js';
-import { buildUpdateSet, attachRelationship, detachRelationship } from '../../utils/sql.js';
+import {
+  buildUpdateSet,
+  attachRelationship,
+  detachRelationship,
+  attachRelationshipWithQuantity,
+  updateRelationshipQuantity,
+} from '../../utils/sql.js';
 
 const OVERRIDE_COLUMNS = `id, shop_id, menu_item_id, is_enabled, price_override, created_at, updated_at`;
 const LOCAL_ITEM_COLUMNS = `id, shop_id, category_id, name, description, price, display_order, created_at, updated_at`;
@@ -227,15 +233,29 @@ export async function detachModifierGroupFromLocalItem(shopMenuItemId, modifierG
   );
 }
 
-// --- Ingredients / allergens (6.5) ---
+// --- Ingredients / allergens (6.5, extended by 7.2) ---
 
-export async function attachIngredientToLocalItem(shopMenuItemId, ingredientId) {
-  return attachRelationship(
+/** Throws Postgres unique-violation (23505) if this ingredient is already attached to this local item. */
+export async function attachIngredientToLocalItem(shopMenuItemId, ingredientId, quantity) {
+  return attachRelationshipWithQuantity(
     'shop_menu_item_ingredients',
     'shop_menu_item_id',
     shopMenuItemId,
     'ingredient_id',
-    ingredientId
+    ingredientId,
+    quantity
+  );
+}
+
+/** Adjusts an already-attached ingredient's recipe quantity on a local item, without detaching and reattaching. */
+export async function updateLocalItemIngredientQuantity(shopMenuItemId, ingredientId, quantity) {
+  return updateRelationshipQuantity(
+    'shop_menu_item_ingredients',
+    'shop_menu_item_id',
+    shopMenuItemId,
+    'ingredient_id',
+    ingredientId,
+    quantity
   );
 }
 
@@ -247,6 +267,20 @@ export async function detachIngredientFromLocalItem(shopMenuItemId, ingredientId
     'ingredient_id',
     ingredientId
   );
+}
+
+/** Each row is the ingredient's own fields plus this local item's recipe quantity for it. */
+export async function listAttachedIngredientsForLocalItem(shopMenuItemId) {
+  const { rows } = await query(
+    `SELECT i.id, i.company_id, i.name, i.unit, i.allergens, i.created_at, i.updated_at,
+            smii.quantity
+     FROM shop_menu_item_ingredients smii
+     JOIN ingredients i ON i.id = smii.ingredient_id AND i.deleted_at IS NULL
+     WHERE smii.shop_menu_item_id = $1
+     ORDER BY i.name`,
+    [shopMenuItemId]
+  );
+  return rows;
 }
 
 /**
@@ -276,6 +310,7 @@ export async function listAggregatedAllergensForMasterItems(companyId) {
   return rows;
 }
 
+/** Same as above, one level down for LOCAL items - identically-shaped flat rows. */
 export async function listAggregatedAllergensForLocalItems(shopId) {
   const { rows } = await query(
     `SELECT smi.id AS item_id, array_agg(DISTINCT allergen ORDER BY allergen) AS allergens

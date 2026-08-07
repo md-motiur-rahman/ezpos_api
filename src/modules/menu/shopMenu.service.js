@@ -368,9 +368,22 @@ export async function detachModifierGroupFromLocalItem(actor, shopId, itemId, gr
   }
 }
 
-// --- Attaching ingredients to a LOCAL item's recipe (6.5) ---
+// --- Ingredients / allergens (6.5, extended by 7.2) ---
 
-export async function attachIngredientToLocalItem(actor, shopId, itemId, ingredientId) {
+function toLocalRecipeIngredientResponse(row) {
+  return {
+    id: row.id,
+    companyId: row.company_id,
+    name: row.name,
+    unit: row.unit,
+    allergens: row.allergens,
+    quantity: Number(row.quantity),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function attachIngredientToLocalItem(actor, shopId, itemId, ingredientId, quantity) {
   const { authority, shop } = await requireShopContext(actor, shopId);
   assertHasPermission(authority, PERMISSIONS.MANAGE_MENU, MANAGE_MENU_MESSAGE);
 
@@ -384,12 +397,35 @@ export async function attachIngredientToLocalItem(actor, shopId, itemId, ingredi
   }
 
   try {
-    await shopMenuRepository.attachIngredientToLocalItem(itemId, ingredientId);
+    await shopMenuRepository.attachIngredientToLocalItem(itemId, ingredientId, quantity);
   } catch (err) {
     if (err.code === POSTGRES_UNIQUE_VIOLATION) {
       throw new AppError('This ingredient is already attached to this item', 409);
     }
     throw err;
+  }
+}
+
+export async function updateLocalItemIngredientQuantity(actor, shopId, itemId, ingredientId, quantity) {
+  const { authority, shop } = await requireShopContext(actor, shopId);
+  assertHasPermission(authority, PERMISSIONS.MANAGE_MENU, MANAGE_MENU_MESSAGE);
+
+  await getLocalItemOrThrow(shopId, itemId);
+  const ingredient = await menuRepository.findActiveIngredientByIdForCompany(
+    ingredientId,
+    shop.company_id
+  );
+  if (!ingredient) {
+    throw new AppError('Ingredient not found', 404);
+  }
+
+  const updated = await shopMenuRepository.updateLocalItemIngredientQuantity(
+    itemId,
+    ingredientId,
+    quantity
+  );
+  if (!updated) {
+    throw new AppError('This ingredient is not attached to this item', 404);
   }
 }
 
@@ -410,4 +446,12 @@ export async function detachIngredientFromLocalItem(actor, shopId, itemId, ingre
   if (!detached) {
     throw new AppError('This ingredient is not attached to this item', 404);
   }
+}
+
+export async function listLocalItemIngredients(actor, shopId, itemId) {
+  await requireShopContext(actor, shopId); // scope check only - reads stay open
+  await getLocalItemOrThrow(shopId, itemId);
+
+  const ingredients = await shopMenuRepository.listAttachedIngredientsForLocalItem(itemId);
+  return ingredients.map(toLocalRecipeIngredientResponse);
 }

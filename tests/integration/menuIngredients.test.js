@@ -56,16 +56,17 @@ async function createCategoryAndItem(header) {
 
 // --- Ingredient CRUD ---
 
-test('POST ingredients creates an ingredient with allergens', async () => {
+test('POST ingredients creates an ingredient with a unit and allergens', async () => {
   const { header } = await setupOwnerWithCompany();
 
   const res = await request(app)
     .post('/api/companies/mine/ingredients')
     .set('Authorization', header)
-    .send({ name: 'Wheat Flour', allergens: ['gluten'] });
+    .send({ name: 'Wheat Flour', unit: 'kg', allergens: ['gluten'] });
 
   assert.equal(res.status, 201);
   assert.equal(res.body.name, 'Wheat Flour');
+  assert.equal(res.body.unit, 'kg');
   assert.deepEqual(res.body.allergens, ['gluten']);
 });
 
@@ -75,10 +76,21 @@ test('POST ingredients defaults to an empty allergens array', async () => {
   const res = await request(app)
     .post('/api/companies/mine/ingredients')
     .set('Authorization', header)
-    .send({ name: 'Water' });
+    .send({ name: 'Water', unit: 'L' });
 
   assert.equal(res.status, 201);
   assert.deepEqual(res.body.allergens, []);
+});
+
+test('POST ingredients rejects a missing unit', async () => {
+  const { header } = await setupOwnerWithCompany();
+
+  const res = await request(app)
+    .post('/api/companies/mine/ingredients')
+    .set('Authorization', header)
+    .send({ name: 'Water' });
+
+  assert.equal(res.status, 400);
 });
 
 test('POST ingredients rejects an unknown allergen code', async () => {
@@ -87,7 +99,7 @@ test('POST ingredients rejects an unknown allergen code', async () => {
   const res = await request(app)
     .post('/api/companies/mine/ingredients')
     .set('Authorization', header)
-    .send({ name: 'Mystery Ingredient', allergens: ['unicorn_dust'] });
+    .send({ name: 'Mystery Ingredient', unit: 'each', allergens: ['unicorn_dust'] });
 
   assert.equal(res.status, 400);
 });
@@ -97,11 +109,11 @@ test('GET ingredients lists ingredients for the company', async () => {
   await request(app)
     .post('/api/companies/mine/ingredients')
     .set('Authorization', header)
-    .send({ name: 'Wheat Flour', allergens: ['gluten'] });
+    .send({ name: 'Wheat Flour', unit: 'kg', allergens: ['gluten'] });
   await request(app)
     .post('/api/companies/mine/ingredients')
     .set('Authorization', header)
-    .send({ name: 'Milk', allergens: ['milk'] });
+    .send({ name: 'Milk', unit: 'L', allergens: ['milk'] });
 
   const res = await request(app).get('/api/companies/mine/ingredients').set('Authorization', header);
 
@@ -109,20 +121,21 @@ test('GET ingredients lists ingredients for the company', async () => {
   assert.equal(res.body.length, 2);
 });
 
-test('PATCH ingredients updates name and allergens', async () => {
+test('PATCH ingredients updates name, unit, and allergens', async () => {
   const { header } = await setupOwnerWithCompany();
   const ingredient = await request(app)
     .post('/api/companies/mine/ingredients')
     .set('Authorization', header)
-    .send({ name: 'Milk', allergens: ['milk'] });
+    .send({ name: 'Milk', unit: 'L', allergens: ['milk'] });
 
   const res = await request(app)
     .patch(`/api/companies/mine/ingredients/${ingredient.body.id}`)
     .set('Authorization', header)
-    .send({ name: 'Oat Milk', allergens: [] });
+    .send({ name: 'Oat Milk', unit: 'ml', allergens: [] });
 
   assert.equal(res.status, 200);
   assert.equal(res.body.name, 'Oat Milk');
+  assert.equal(res.body.unit, 'ml');
   assert.deepEqual(res.body.allergens, []);
 });
 
@@ -131,7 +144,7 @@ test('an ingredient from another company returns 404', async () => {
   const ingredientA = await request(app)
     .post('/api/companies/mine/ingredients')
     .set('Authorization', ownerA.header)
-    .send({ name: 'Wheat Flour', allergens: ['gluten'] });
+    .send({ name: 'Wheat Flour', unit: 'kg', allergens: ['gluten'] });
   const ownerB = await setupOwnerWithCompany();
 
   const res = await request(app)
@@ -147,7 +160,7 @@ test('DELETE removes an ingredient; it disappears from listings', async () => {
   const ingredient = await request(app)
     .post('/api/companies/mine/ingredients')
     .set('Authorization', header)
-    .send({ name: 'Milk', allergens: ['milk'] });
+    .send({ name: 'Milk', unit: 'L', allergens: ['milk'] });
 
   const deleteRes = await request(app)
     .delete(`/api/companies/mine/ingredients/${ingredient.body.id}`)
@@ -158,21 +171,38 @@ test('DELETE removes an ingredient; it disappears from listings', async () => {
   assert.equal(listRes.body.length, 0);
 });
 
-// --- Attach / detach to a master item's recipe ---
+// --- Attach / detach to a master item's recipe (7.2: now with quantity) ---
 
-test('POST attaches an ingredient to an item', async () => {
+test('POST attaches an ingredient to an item with a quantity', async () => {
   const { header } = await setupOwnerWithCompany();
   const item = await createCategoryAndItem(header);
   const ingredient = await request(app)
     .post('/api/companies/mine/ingredients')
     .set('Authorization', header)
-    .send({ name: 'Wheat Flour', allergens: ['gluten'] });
+    .send({ name: 'Wheat Flour', unit: 'kg', allergens: ['gluten'] });
 
   const res = await request(app)
     .post(`/api/companies/mine/menu-items/${item.id}/ingredients/${ingredient.body.id}`)
-    .set('Authorization', header);
+    .set('Authorization', header)
+    .send({ quantity: 0.15 });
 
   assert.equal(res.status, 201);
+});
+
+test('POST attaching an ingredient with no quantity is rejected', async () => {
+  const { header } = await setupOwnerWithCompany();
+  const item = await createCategoryAndItem(header);
+  const ingredient = await request(app)
+    .post('/api/companies/mine/ingredients')
+    .set('Authorization', header)
+    .send({ name: 'Wheat Flour', unit: 'kg' });
+
+  const res = await request(app)
+    .post(`/api/companies/mine/menu-items/${item.id}/ingredients/${ingredient.body.id}`)
+    .set('Authorization', header)
+    .send({});
+
+  assert.equal(res.status, 400);
 });
 
 test('attaching the same ingredient twice returns 409', async () => {
@@ -181,28 +211,72 @@ test('attaching the same ingredient twice returns 409', async () => {
   const ingredient = await request(app)
     .post('/api/companies/mine/ingredients')
     .set('Authorization', header)
-    .send({ name: 'Wheat Flour', allergens: ['gluten'] });
+    .send({ name: 'Wheat Flour', unit: 'kg', allergens: ['gluten'] });
   await request(app)
     .post(`/api/companies/mine/menu-items/${item.id}/ingredients/${ingredient.body.id}`)
-    .set('Authorization', header);
+    .set('Authorization', header)
+    .send({ quantity: 0.15 });
 
   const res = await request(app)
     .post(`/api/companies/mine/menu-items/${item.id}/ingredients/${ingredient.body.id}`)
-    .set('Authorization', header);
+    .set('Authorization', header)
+    .send({ quantity: 0.2 });
 
   assert.equal(res.status, 409);
 });
 
-test('GET item ingredients returns the attached ingredients', async () => {
+test('PATCH adjusts an already-attached ingredient\'s quantity without detaching', async () => {
   const { header } = await setupOwnerWithCompany();
   const item = await createCategoryAndItem(header);
   const ingredient = await request(app)
     .post('/api/companies/mine/ingredients')
     .set('Authorization', header)
-    .send({ name: 'Wheat Flour', allergens: ['gluten'] });
+    .send({ name: 'Wheat Flour', unit: 'kg' });
   await request(app)
     .post(`/api/companies/mine/menu-items/${item.id}/ingredients/${ingredient.body.id}`)
+    .set('Authorization', header)
+    .send({ quantity: 0.15 });
+
+  const res = await request(app)
+    .patch(`/api/companies/mine/menu-items/${item.id}/ingredients/${ingredient.body.id}`)
+    .set('Authorization', header)
+    .send({ quantity: 0.2 });
+
+  assert.equal(res.status, 200);
+
+  const listRes = await request(app)
+    .get(`/api/companies/mine/menu-items/${item.id}/ingredients`)
     .set('Authorization', header);
+  assert.equal(listRes.body[0].quantity, 0.2);
+});
+
+test('PATCH quantity on an ingredient that is not attached returns 404', async () => {
+  const { header } = await setupOwnerWithCompany();
+  const item = await createCategoryAndItem(header);
+  const ingredient = await request(app)
+    .post('/api/companies/mine/ingredients')
+    .set('Authorization', header)
+    .send({ name: 'Wheat Flour', unit: 'kg' });
+
+  const res = await request(app)
+    .patch(`/api/companies/mine/menu-items/${item.id}/ingredients/${ingredient.body.id}`)
+    .set('Authorization', header)
+    .send({ quantity: 0.2 });
+
+  assert.equal(res.status, 404);
+});
+
+test('GET item ingredients returns the attached ingredients with their quantities', async () => {
+  const { header } = await setupOwnerWithCompany();
+  const item = await createCategoryAndItem(header);
+  const ingredient = await request(app)
+    .post('/api/companies/mine/ingredients')
+    .set('Authorization', header)
+    .send({ name: 'Wheat Flour', unit: 'kg', allergens: ['gluten'] });
+  await request(app)
+    .post(`/api/companies/mine/menu-items/${item.id}/ingredients/${ingredient.body.id}`)
+    .set('Authorization', header)
+    .send({ quantity: 0.15 });
 
   const res = await request(app)
     .get(`/api/companies/mine/menu-items/${item.id}/ingredients`)
@@ -211,6 +285,8 @@ test('GET item ingredients returns the attached ingredients', async () => {
   assert.equal(res.status, 200);
   assert.equal(res.body.length, 1);
   assert.equal(res.body[0].id, ingredient.body.id);
+  assert.equal(res.body[0].quantity, 0.15);
+  assert.equal(res.body[0].unit, 'kg');
 });
 
 test('DELETE detaches an ingredient from an item', async () => {
@@ -219,10 +295,11 @@ test('DELETE detaches an ingredient from an item', async () => {
   const ingredient = await request(app)
     .post('/api/companies/mine/ingredients')
     .set('Authorization', header)
-    .send({ name: 'Wheat Flour', allergens: ['gluten'] });
+    .send({ name: 'Wheat Flour', unit: 'kg', allergens: ['gluten'] });
   await request(app)
     .post(`/api/companies/mine/menu-items/${item.id}/ingredients/${ingredient.body.id}`)
-    .set('Authorization', header);
+    .set('Authorization', header)
+    .send({ quantity: 0.15 });
 
   const deleteRes = await request(app)
     .delete(`/api/companies/mine/menu-items/${item.id}/ingredients/${ingredient.body.id}`)
@@ -241,7 +318,7 @@ test('detaching an ingredient that is not attached returns 404', async () => {
   const ingredient = await request(app)
     .post('/api/companies/mine/ingredients')
     .set('Authorization', header)
-    .send({ name: 'Wheat Flour', allergens: ['gluten'] });
+    .send({ name: 'Wheat Flour', unit: 'kg', allergens: ['gluten'] });
 
   const res = await request(app)
     .delete(`/api/companies/mine/menu-items/${item.id}/ingredients/${ingredient.body.id}`)

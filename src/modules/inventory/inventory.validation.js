@@ -30,3 +30,25 @@ export const inventoryItemIdParamSchema = z.object({
 export const inventoryListQuerySchema = z.object({
   lowStockOnly: z.enum(['true', 'false']).optional(),
 });
+
+// --- Item <-> supplier linking (7.4) ---
+
+export const itemSupplierParamSchema = z.object({
+  shopId: z.string().uuid('Invalid shop id'),
+  itemId: z.string().uuid('Invalid inventory item id'),
+  supplierId: z.string().uuid('Invalid supplier id'),
+});
+
+// isDefault optional on attach - a supplier can be linked without being
+// made the default immediately.
+export const attachSupplierBodySchema = z.object({
+  isDefault: z.boolean().optional(),
+});
+
+// Required on PATCH, unlike attach - this endpoint exists specifically to
+// let the default be changed later ("chicken breast defaults to Bidfood but
+// can also come from another vendor"), so the one field it edits isn't
+// optional.
+export const updateItemSupplierBodySchema = z.object({
+  isDefault: z.boolean(),
+});

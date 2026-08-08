@@ -30,3 +30,42 @@ export const deleteItem = asyncHandler(async (req, res) => {
   await inventoryService.deleteItem(req.actor, req.params.shopId, req.params.itemId);
   res.status(200).json({ message: 'Inventory item deleted.' });
 });
+
+// --- Item <-> supplier linking (7.4) ---
+
+export const attachSupplierToItem = asyncHandler(async (req, res) => {
+  await inventoryService.attachSupplierToItem(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId,
+    req.params.supplierId,
+    req.body.isDefault
+  );
+  res.status(201).json({ message: 'Supplier linked.' });
+});
+
+export const updateItemSupplierDefault = asyncHandler(async (req, res) => {
+  await inventoryService.updateItemSupplierDefault(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId,
+    req.params.supplierId,
+    req.body.isDefault
+  );
+  res.status(200).json({ message: 'Supplier link updated.' });
+});
+
+export const detachSupplierFromItem = asyncHandler(async (req, res) => {
+  await inventoryService.detachSupplierFromItem(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId,
+    req.params.supplierId
+  );
+  res.status(200).json({ message: 'Supplier unlinked.' });
+});
+
+export const listItemSuppliers = asyncHandler(async (req, res) => {
+  const suppliers = await inventoryService.listItemSuppliers(req.actor, req.params.shopId, req.params.itemId);
+  res.status(200).json(suppliers);
+});

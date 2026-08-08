@@ -21,6 +21,7 @@ import swapRequestRoutes from './modules/rota/swapRequest.routes.js';
 import attendanceRoutes from './modules/rota/attendance.routes.js';
 import shopMenuRoutes from './modules/menu/shopMenu.routes.js';
 import inventoryRoutes from './modules/inventory/inventory.routes.js';
+import supplierRoutes from './modules/suppliers/supplier.routes.js';
 
 const app = express();
 
@@ -91,6 +92,7 @@ app.use('/api/shops/:shopId/swap-requests', swapRequestRoutes);
 app.use('/api/shops/:shopId/attendance', attendanceRoutes);
 app.use('/api/shops/:shopId/menu', shopMenuRoutes);
 app.use('/api/shops/:shopId/inventory-items', inventoryRoutes);
+app.use('/api/shops/:shopId/suppliers', supplierRoutes);
 app.use('/api/shops', shopRoutes);
 app.use('/api/staff-auth', staffAuthRoutes);
 app.use('/api/staff-permissions', staffPermissionRoutes);

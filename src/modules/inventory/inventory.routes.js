@@ -7,6 +7,9 @@ import {
   updateInventoryItemSchema,
   inventoryItemIdParamSchema,
   inventoryListQuerySchema,
+  itemSupplierParamSchema,
+  attachSupplierBodySchema,
+  updateItemSupplierBodySchema,
 } from './inventory.validation.js';
 import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
 
@@ -47,5 +50,30 @@ router.patch(
   inventoryController.updateItem
 );
 router.delete('/:itemId', validateParams(inventoryItemIdParamSchema), inventoryController.deleteItem);
+
+// --- Item <-> supplier linking (7.4) ---
+
+router.post(
+  '/:itemId/suppliers/:supplierId',
+  validateParams(itemSupplierParamSchema),
+  validateBody(attachSupplierBodySchema),
+  inventoryController.attachSupplierToItem
+);
+router.get(
+  '/:itemId/suppliers',
+  validateParams(inventoryItemIdParamSchema),
+  inventoryController.listItemSuppliers
+);
+router.patch(
+  '/:itemId/suppliers/:supplierId',
+  validateParams(itemSupplierParamSchema),
+  validateBody(updateItemSupplierBodySchema),
+  inventoryController.updateItemSupplierDefault
+);
+router.delete(
+  '/:itemId/suppliers/:supplierId',
+  validateParams(itemSupplierParamSchema),
+  inventoryController.detachSupplierFromItem
+);
 
 export default router;

@@ -1,5 +1,5 @@
 import { query } from '../../db/pool.js';
-import { buildUpdateSet } from '../../utils/sql.js';
+import { buildUpdateSet, detachRelationship } from '../../utils/sql.js';
 
 const COLUMNS = `id, shop_id, name, unit, quantity_on_hand, low_stock_threshold, created_at, updated_at`;
 
@@ -60,4 +60,87 @@ export async function updateItem(id, data) {
 
 export async function softDeleteItem(id) {
   await query(`UPDATE inventory_items SET deleted_at = now(), updated_at = now() WHERE id = $1`, [id]);
+}
+
+// --- Item <-> supplier linking (7.4) ---
+
+const SUPPLIER_LINK_COLUMNS = `id, inventory_item_id, supplier_id, is_default, created_at, updated_at`;
+
+/**
+ * Throws Postgres unique-violation (23505) if this supplier is already
+ * attached to this item. If isDefault is true, unsets any existing default
+ * for the item first, as a SEPARATE statement before the INSERT - not
+ * combined into one CTE. Verified empirically that a same-statement CTE
+ * swap can trip the partial unique index (inventory_item_suppliers_
+ * one_default_per_item) mid-statement, since Postgres checks a unique
+ * INDEX (unlike a deferrable CONSTRAINT, which can't express partial
+ * uniqueness at all) per-row as it's written, not deferred to statement
+ * end - even within a single WITH-clause statement.
+ */
+export async function attachSupplierToItem(itemId, supplierId, isDefault) {
+  if (isDefault) {
+    await query(
+      `UPDATE inventory_item_suppliers SET is_default = false, updated_at = now()
+       WHERE inventory_item_id = $1 AND is_default = true`,
+      [itemId]
+    );
+  }
+  const { rows } = await query(
+    `INSERT INTO inventory_item_suppliers (inventory_item_id, supplier_id, is_default)
+     VALUES ($1, $2, $3)
+     RETURNING ${SUPPLIER_LINK_COLUMNS}`,
+    [itemId, supplierId, isDefault ?? false]
+  );
+  return rows[0];
+}
+
+/** Makes this supplier the default for the item, unsetting any other default first. Returns null if not attached. */
+export async function setSupplierAsDefaultForItem(itemId, supplierId) {
+  await query(
+    `UPDATE inventory_item_suppliers SET is_default = false, updated_at = now()
+     WHERE inventory_item_id = $1 AND supplier_id != $2 AND is_default = true`,
+    [itemId, supplierId]
+  );
+  const { rows } = await query(
+    `UPDATE inventory_item_suppliers SET is_default = true, updated_at = now()
+     WHERE inventory_item_id = $1 AND supplier_id = $2
+     RETURNING ${SUPPLIER_LINK_COLUMNS}`,
+    [itemId, supplierId]
+  );
+  return rows[0] ?? null;
+}
+
+/** Unsets this supplier as default, leaving the item with no default. Returns null if not attached. */
+export async function unsetSupplierAsDefaultForItem(itemId, supplierId) {
+  const { rows } = await query(
+    `UPDATE inventory_item_suppliers SET is_default = false, updated_at = now()
+     WHERE inventory_item_id = $1 AND supplier_id = $2
+     RETURNING ${SUPPLIER_LINK_COLUMNS}`,
+    [itemId, supplierId]
+  );
+  return rows[0] ?? null;
+}
+
+export async function detachSupplierFromItem(itemId, supplierId) {
+  return detachRelationship(
+    'inventory_item_suppliers',
+    'inventory_item_id',
+    itemId,
+    'supplier_id',
+    supplierId
+  );
+}
+
+/** Each row is the supplier's own fields plus whether it's this item's default. */
+export async function listSuppliersForItem(itemId) {
+  const { rows } = await query(
+    `SELECT s.id, s.shop_id, s.name, s.contact_name, s.phone, s.email, s.notes,
+            s.created_at, s.updated_at, iis.is_default
+     FROM inventory_item_suppliers iis
+     JOIN suppliers s ON s.id = iis.supplier_id AND s.deleted_at IS NULL
+     WHERE iis.inventory_item_id = $1
+     ORDER BY iis.is_default DESC, s.name`,
+    [itemId]
+  );
+  return rows;
 }

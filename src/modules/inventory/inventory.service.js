@@ -2,6 +2,7 @@ import { AppError } from '../../utils/AppError.js';
 import { PERMISSIONS } from '../staff/permissions.js';
 import { resolveActorAuthority, assertHasPermission } from '../staff/actorAuthority.js';
 import * as inventoryRepository from './inventory.repository.js';
+import * as supplierRepository from '../suppliers/supplier.repository.js';
 
 /**
  * Unlike Module 6's menu, reads here are NOT open to every in-scope actor -
@@ -29,6 +30,12 @@ async function requireManageInventory(actor, shopId) {
   );
   return authority;
 }
+
+// Exported for reuse - suppliers (7.4) and the item<->supplier links below
+// are inventory-adjacent, back-of-house data using this exact same
+// permission pair, same cross-module reuse pattern as shopMenu.service.js
+// importing groupModifierRows from menu.service.js (6.4).
+export { requireViewInventory, requireManageInventory };
 
 function toResponse(item) {
   const lowStockThreshold =
@@ -90,4 +97,86 @@ export async function deleteItem(actor, shopId, itemId) {
   await requireManageInventory(actor, shopId);
   const item = await getItemOrThrow(shopId, itemId);
   await inventoryRepository.softDeleteItem(item.id);
+}
+
+// --- Item <-> supplier linking (7.4) ---
+
+const POSTGRES_UNIQUE_VIOLATION = '23505';
+
+function toItemSupplierResponse(row) {
+  return {
+    id: row.id,
+    shopId: row.shop_id,
+    name: row.name,
+    contactName: row.contact_name,
+    phone: row.phone,
+    email: row.email,
+    notes: row.notes,
+    isDefault: row.is_default,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function getSupplierForShopOrThrow(shopId, supplierId) {
+  const supplier = await supplierRepository.findActiveSupplierByIdForShop(supplierId, shopId);
+  if (!supplier) {
+    throw new AppError('Supplier not found', 404);
+  }
+  return supplier;
+}
+
+export async function attachSupplierToItem(actor, shopId, itemId, supplierId, isDefault) {
+  await requireManageInventory(actor, shopId);
+  await getItemOrThrow(shopId, itemId);
+  await getSupplierForShopOrThrow(shopId, supplierId);
+
+  try {
+    await inventoryRepository.attachSupplierToItem(itemId, supplierId, isDefault);
+  } catch (err) {
+    if (err.code === POSTGRES_UNIQUE_VIOLATION) {
+      throw new AppError('This supplier is already linked to this item', 409);
+    }
+    throw err;
+  }
+}
+
+/**
+ * The "editable" half of the link - lets isDefault be flipped later without
+ * detaching and reattaching, exactly the "chicken breast defaults to
+ * Bidfood but can also come from Brakes" case confirmed directly: switching
+ * the default is PATCHing the Brakes link to isDefault: true, not touching
+ * either attachment itself.
+ */
+export async function updateItemSupplierDefault(actor, shopId, itemId, supplierId, isDefault) {
+  await requireManageInventory(actor, shopId);
+  await getItemOrThrow(shopId, itemId);
+  await getSupplierForShopOrThrow(shopId, supplierId);
+
+  const updated = isDefault
+    ? await inventoryRepository.setSupplierAsDefaultForItem(itemId, supplierId)
+    : await inventoryRepository.unsetSupplierAsDefaultForItem(itemId, supplierId);
+
+  if (!updated) {
+    throw new AppError('This supplier is not linked to this item', 404);
+  }
+}
+
+export async function detachSupplierFromItem(actor, shopId, itemId, supplierId) {
+  await requireManageInventory(actor, shopId);
+  await getItemOrThrow(shopId, itemId);
+  await getSupplierForShopOrThrow(shopId, supplierId);
+
+  const detached = await inventoryRepository.detachSupplierFromItem(itemId, supplierId);
+  if (!detached) {
+    throw new AppError('This supplier is not linked to this item', 404);
+  }
+}
+
+export async function listItemSuppliers(actor, shopId, itemId) {
+  await requireViewInventory(actor, shopId);
+  await getItemOrThrow(shopId, itemId);
+
+  const suppliers = await inventoryRepository.listSuppliersForItem(itemId);
+  return suppliers.map(toItemSupplierResponse);
 }

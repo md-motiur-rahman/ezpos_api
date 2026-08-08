@@ -218,7 +218,7 @@ test('GET a single purchase order returns full line item detail', async () => {
 
   assert.equal(res.status, 200);
   assert.equal(res.body.items[0].itemName, 'Chicken Breast');
-  assert.equal(res.body.items[0].quantity, 10);
+  assert.equal(res.body.items[0].orderedQuantity, 10);
 });
 
 test('a purchase order from another shop returns 404', async () => {

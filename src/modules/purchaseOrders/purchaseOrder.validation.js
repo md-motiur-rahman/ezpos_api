@@ -26,3 +26,27 @@ export const purchaseOrderIdParamSchema = z.object({
   shopId: z.string().uuid('Invalid shop id'),
   poId: z.string().uuid('Invalid purchase order id'),
 });
+
+// --- Stock receiving (7.6) ---
+
+const receiptItemSchema = z.object({
+  purchaseOrderItemId: z.string().uuid('Invalid purchase order item id'),
+  // Deliberately no upper bound tied to the ordered quantity - over- and
+  // under-delivery are real scenarios this module needs to FLAG, not
+  // silently prevent by capping the input.
+  quantityReceived: z.number().positive('quantityReceived must be greater than 0'),
+});
+
+export const createReceiptSchema = z.object({
+  // Optional - defaults to now() at the DB layer if omitted, same
+  // backdating precedent as purchase_orders.ordered_at (7.5).
+  receivedAt: z.string().datetime({ message: 'receivedAt must be an ISO 8601 datetime' }).optional(),
+  notes: z.string().trim().optional(),
+  items: z
+    .array(receiptItemSchema)
+    .min(1, 'A receipt must have at least one line item')
+    .refine(
+      (items) => new Set(items.map((i) => i.purchaseOrderItemId)).size === items.length,
+      { message: 'Duplicate purchaseOrderItemId in items - each line should appear once per receipt' }
+    ),
+});

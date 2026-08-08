@@ -78,13 +78,22 @@ export async function findActivePurchaseOrderByIdForShop(id, shopId) {
   return rows[0] ?? null;
 }
 
-export async function listItemsForPurchaseOrder(purchaseOrderId) {
+/**
+ * Ordered quantity per PO line item, plus cumulative received-so-far
+ * (summed across every receipt logged against that line item, correctly
+ * 0 via COALESCE if none have been received yet). This is what the service
+ * layer computes discrepancy from.
+ */
+export async function listItemsWithReceivedQuantities(purchaseOrderId) {
   const { rows } = await query(
     `SELECT poi.id, poi.inventory_item_id, ii.name AS item_name, ii.unit,
-            poi.quantity, poi.unit_cost, poi.created_at
+            poi.quantity AS ordered_quantity, poi.unit_cost, poi.created_at,
+            COALESCE(SUM(pori.quantity_received), 0) AS received_quantity
      FROM purchase_order_items poi
      JOIN inventory_items ii ON ii.id = poi.inventory_item_id
+     LEFT JOIN purchase_order_receipt_items pori ON pori.purchase_order_item_id = poi.id
      WHERE poi.purchase_order_id = $1
+     GROUP BY poi.id, ii.name, ii.unit
      ORDER BY ii.name`,
     [purchaseOrderId]
   );
@@ -93,4 +102,95 @@ export async function listItemsForPurchaseOrder(purchaseOrderId) {
 
 export async function softDeletePurchaseOrder(id) {
   await query(`UPDATE purchase_orders SET deleted_at = now(), updated_at = now() WHERE id = $1`, [id]);
+}
+
+// --- Stock receiving (7.6) ---
+
+const RECEIPT_COLUMNS = `id, purchase_order_id, received_at, notes, created_at, updated_at`;
+
+export async function createReceipt(purchaseOrderId, { receivedAt, notes }) {
+  const { rows } = await query(
+    `INSERT INTO purchase_order_receipts (purchase_order_id, received_at, notes)
+     VALUES ($1, COALESCE($2, now()), $3)
+     RETURNING ${RECEIPT_COLUMNS}`,
+    [purchaseOrderId, receivedAt ?? null, notes ?? null]
+  );
+  return rows[0];
+}
+
+/** Same bulk-insert-via-unnest() pattern as createPurchaseOrderItems (7.5) - one atomic statement. */
+export async function createReceiptItems(receiptId, items) {
+  const poItemIds = items.map((i) => i.purchaseOrderItemId);
+  const quantities = items.map((i) => i.quantityReceived);
+  const { rows } = await query(
+    `INSERT INTO purchase_order_receipt_items (purchase_order_receipt_id, purchase_order_item_id, quantity_received)
+     SELECT $1, unnest($2::uuid[]), unnest($3::numeric[])
+     RETURNING id, purchase_order_receipt_id, purchase_order_item_id, quantity_received, created_at`,
+    [receiptId, poItemIds, quantities]
+  );
+  return rows;
+}
+
+/**
+ * Fetches the PO items being received (id + inventory_item_id), SCOPED to
+ * this specific PO - serves two purposes at once: validating that every
+ * referenced purchase_order_item_id actually belongs to this PO (compare
+ * the returned row count to poItemIds.length), and resolving each one's
+ * underlying inventory_item_id for the stock update, without a second query.
+ */
+export async function findPoItemsForPurchaseOrder(purchaseOrderId, poItemIds) {
+  const { rows } = await query(
+    `SELECT id, inventory_item_id FROM purchase_order_items
+     WHERE id = ANY($1::uuid[]) AND purchase_order_id = $2`,
+    [poItemIds, purchaseOrderId]
+  );
+  return rows;
+}
+
+/**
+ * Bulk stock increment via UPDATE...FROM unnest() - one atomic statement
+ * for every affected inventory item, even when several line items are
+ * received at once. Verified empirically, including that two separate
+ * receipts against the same item correctly ACCUMULATE rather than
+ * overwrite (0+5, then +3, correctly yields 8) - this is the actual
+ * mechanism a "logging only" module never had: this one changes real stock.
+ */
+export async function incrementInventoryQuantities(inventoryItemIds, amounts) {
+  await query(
+    `UPDATE inventory_items
+     SET quantity_on_hand = quantity_on_hand + delta.amount, updated_at = now()
+     FROM (SELECT unnest($1::uuid[]) AS item_id, unnest($2::numeric[]) AS amount) AS delta
+     WHERE inventory_items.id = delta.item_id`,
+    [inventoryItemIds, amounts]
+  );
+}
+
+export async function listReceiptsForPurchaseOrder(purchaseOrderId) {
+  const { rows } = await query(
+    `SELECT ${RECEIPT_COLUMNS} FROM purchase_order_receipts
+     WHERE purchase_order_id = $1
+     ORDER BY received_at DESC`,
+    [purchaseOrderId]
+  );
+  return rows;
+}
+
+/**
+ * Every receipt line item across EVERY receipt for this PO, flat (tagged
+ * with purchase_order_receipt_id) - same "flat query + group in JS" pattern
+ * as 6.4's modifiers, avoiding an N+1 query per receipt.
+ */
+export async function listAllReceiptItemsForPurchaseOrder(purchaseOrderId) {
+  const { rows } = await query(
+    `SELECT pori.id, pori.purchase_order_receipt_id, pori.purchase_order_item_id,
+            ii.name AS item_name, ii.unit, pori.quantity_received, pori.created_at
+     FROM purchase_order_receipt_items pori
+     JOIN purchase_order_items poi ON poi.id = pori.purchase_order_item_id
+     JOIN inventory_items ii ON ii.id = poi.inventory_item_id
+     JOIN purchase_order_receipts por ON por.id = pori.purchase_order_receipt_id
+     WHERE por.purchase_order_id = $1
+     ORDER BY ii.name`,
+    [purchaseOrderId]
+  );
+  return rows;
 }

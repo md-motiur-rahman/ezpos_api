@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { requireStaffOrOwnerAuth } from '../../middleware/requireStaffOrOwnerAuth.js';
 import { validateBody, validateParams } from '../../middleware/validate.js';
 import * as purchaseOrderController from './purchaseOrder.controller.js';
-import { createPurchaseOrderSchema, purchaseOrderIdParamSchema } from './purchaseOrder.validation.js';
+import { createPurchaseOrderSchema, purchaseOrderIdParamSchema, createReceiptSchema } from './purchaseOrder.validation.js';
 import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
 
 /**
@@ -31,6 +31,15 @@ router.delete(
   '/:poId',
   validateParams(purchaseOrderIdParamSchema),
   purchaseOrderController.deletePurchaseOrder
+);
+
+// --- Stock receiving (7.6) ---
+
+router.post(
+  '/:poId/receipts',
+  validateParams(purchaseOrderIdParamSchema),
+  validateBody(createReceiptSchema),
+  purchaseOrderController.createReceipt
 );
 
 export default router;

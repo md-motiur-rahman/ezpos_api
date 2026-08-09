@@ -40,6 +40,8 @@ async function requireManageInventory(actor, shopId) {
 // importing groupModifierRows from menu.service.js (6.4).
 export { requireViewInventory, requireManageInventory };
 
+const POSTGRES_UNIQUE_VIOLATION = '23505';
+
 function toResponse(item) {
   const lowStockThreshold =
     item.low_stock_threshold === null ? null : Number(item.low_stock_threshold);
@@ -60,15 +62,28 @@ function toResponse(item) {
     // lowStockThreshold above.
     shelfLifeDays: item.shelf_life_days,
     shelfLifeOpenedDays: item.shelf_life_opened_days,
+    sku: item.sku,
     createdAt: item.created_at,
     updatedAt: item.updated_at,
   };
 }
 
+/** Thrown by both createItem and updateItem below on a duplicate sku within the same shop (8.2). */
+function rethrowAsSkuConflict(err) {
+  if (err.code === POSTGRES_UNIQUE_VIOLATION) {
+    throw new AppError('This SKU is already in use by another item in this shop', 409);
+  }
+  throw err;
+}
+
 export async function createItem(actor, shopId, data) {
   await requireManageInventory(actor, shopId);
-  const item = await inventoryRepository.createItem(shopId, data);
-  return toResponse(item);
+  try {
+    const item = await inventoryRepository.createItem(shopId, data);
+    return toResponse(item);
+  } catch (err) {
+    rethrowAsSkuConflict(err);
+  }
 }
 
 export async function listItems(actor, shopId, { lowStockOnly } = {}) {
@@ -97,8 +112,12 @@ export async function updateItem(actor, shopId, itemId, data) {
   await requireManageInventory(actor, shopId);
   await getItemOrThrow(shopId, itemId);
 
-  const updated = await inventoryRepository.updateItem(itemId, data);
-  return toResponse(updated);
+  try {
+    const updated = await inventoryRepository.updateItem(itemId, data);
+    return toResponse(updated);
+  } catch (err) {
+    rethrowAsSkuConflict(err);
+  }
 }
 
 export async function deleteItem(actor, shopId, itemId) {
@@ -108,8 +127,6 @@ export async function deleteItem(actor, shopId, itemId) {
 }
 
 // --- Item <-> supplier linking (7.4) ---
-
-const POSTGRES_UNIQUE_VIOLATION = '23505';
 
 function toItemSupplierResponse(row) {
   return {
@@ -306,6 +323,7 @@ function toOverviewResponse(item) {
     isLowStock: lowStockThreshold !== null && Number(item.quantity_on_hand) <= lowStockThreshold,
     shelfLifeDays: item.shelf_life_days,
     shelfLifeOpenedDays: item.shelf_life_opened_days,
+    sku: item.sku,
     createdAt: item.created_at,
     updatedAt: item.updated_at,
   };

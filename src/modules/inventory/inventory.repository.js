@@ -2,17 +2,17 @@ import { query } from '../../db/pool.js';
 import { buildUpdateSet, detachRelationship } from '../../utils/sql.js';
 
 const COLUMNS = `id, shop_id, name, unit, quantity_on_hand, low_stock_threshold,
-                 shelf_life_days, shelf_life_opened_days, created_at, updated_at`;
+                 shelf_life_days, shelf_life_opened_days, sku, created_at, updated_at`;
 
 export async function createItem(
   shopId,
-  { name, unit, quantityOnHand, lowStockThreshold, shelfLifeDays, shelfLifeOpenedDays }
+  { name, unit, quantityOnHand, lowStockThreshold, shelfLifeDays, shelfLifeOpenedDays, sku }
 ) {
   const { rows } = await query(
     `INSERT INTO inventory_items
        (shop_id, name, unit, quantity_on_hand, low_stock_threshold,
-        shelf_life_days, shelf_life_opened_days)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+        shelf_life_days, shelf_life_opened_days, sku)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING ${COLUMNS}`,
     [
       shopId,
@@ -22,6 +22,7 @@ export async function createItem(
       lowStockThreshold ?? null,
       shelfLifeDays ?? null,
       shelfLifeOpenedDays ?? null,
+      sku ?? null,
     ]
   );
   return rows[0];
@@ -56,6 +57,16 @@ export async function findActiveItemByIdForShop(id, shopId) {
   return rows[0] ?? null;
 }
 
+/** Used by 8.2's scan endpoint - the barcode-scan equivalent of findActiveItemByIdForShop. */
+export async function findActiveItemBySkuForShop(sku, shopId) {
+  const { rows } = await query(
+    `SELECT ${COLUMNS} FROM inventory_items
+     WHERE sku = $1 AND shop_id = $2 AND deleted_at IS NULL`,
+    [sku, shopId]
+  );
+  return rows[0] ?? null;
+}
+
 export async function updateItem(id, data) {
   const fieldMap = {
     name: 'name',
@@ -64,6 +75,7 @@ export async function updateItem(id, data) {
     lowStockThreshold: 'low_stock_threshold',
     shelfLifeDays: 'shelf_life_days',
     shelfLifeOpenedDays: 'shelf_life_opened_days',
+    sku: 'sku',
   };
   const { clause, values } = buildUpdateSet(fieldMap, data);
   values.push(id);
@@ -286,7 +298,7 @@ export async function listActiveItemsForCompany(companyId, { lowStockOnly } = {}
   const { rows } = await query(
     `SELECT ii.id, ii.shop_id, s.name AS shop_name, ii.name, ii.unit,
             ii.quantity_on_hand, ii.low_stock_threshold,
-            ii.shelf_life_days, ii.shelf_life_opened_days, ii.created_at, ii.updated_at
+            ii.shelf_life_days, ii.shelf_life_opened_days, ii.sku, ii.created_at, ii.updated_at
      FROM inventory_items ii
      JOIN shops s ON s.id = ii.shop_id AND s.deleted_at IS NULL
      WHERE s.company_id = $1 AND ii.deleted_at IS NULL

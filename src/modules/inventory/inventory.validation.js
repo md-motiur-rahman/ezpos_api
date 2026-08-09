@@ -9,6 +9,10 @@ const shelfLifeDaysSchema = z
   .int('shelf life must be a whole number of days')
   .positive('shelf life must be greater than 0 days');
 
+// Not every item is barcode-tracked, so this is always optional/nullable,
+// never required - same shape as the shelf-life fields below (8.2).
+const skuSchema = z.string().trim().min(1, 'sku cannot be empty');
+
 export const createInventoryItemSchema = z.object({
   name: z.string().trim().min(1, 'Item name is required'),
   unit: z.string().trim().min(1, 'Unit is required'),
@@ -16,6 +20,7 @@ export const createInventoryItemSchema = z.object({
   lowStockThreshold: z.number().min(0, 'lowStockThreshold cannot be negative').optional(),
   shelfLifeDays: shelfLifeDaysSchema.optional(),
   shelfLifeOpenedDays: shelfLifeDaysSchema.optional(),
+  sku: skuSchema.optional(),
 });
 
 export const updateInventoryItemSchema = z.object({
@@ -31,6 +36,8 @@ export const updateInventoryItemSchema = z.object({
   // Same nullable-and-optional contract as lowStockThreshold above (8.1).
   shelfLifeDays: shelfLifeDaysSchema.nullable().optional(),
   shelfLifeOpenedDays: shelfLifeDaysSchema.nullable().optional(),
+  // Same contract again (8.2) - explicit null un-tracks the barcode.
+  sku: skuSchema.nullable().optional(),
 });
 
 export const inventoryItemIdParamSchema = z.object({

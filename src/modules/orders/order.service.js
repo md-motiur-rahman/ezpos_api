@@ -200,6 +200,31 @@ function resolveOrderLine(resolvedMenu, line) {
   };
 }
 
+/**
+ * Writes already-resolved lines (+ their modifiers) for an order that
+ * already exists - shared by createOrder and 9.2's addItemsToOrder, since
+ * both need the identical "pre-generate ids, bulk-insert items, flatten
+ * and bulk-insert modifiers" sequence. Extracted here (rather than
+ * duplicated in addItemsToOrder) once a second caller needed it, same
+ * "shared cross-module helpers... relocate once a second module needs the
+ * same mechanism" precedent as inventory's adjustInventoryQuantities.
+ * createOrder's own behavior is unchanged by this - same calls, same
+ * order, still verified by its existing tests.
+ */
+async function writeResolvedItems(orderId, resolvedLines) {
+  // Pre-generated, not left to the DB default - verified empirically that
+  // explicit client-generated ids land correctly in a bulk unnest()
+  // insert. Needed BEFORE order_item_modifiers can be inserted, since each
+  // modifier row references its own line's id.
+  const itemsToInsert = resolvedLines.map((line) => ({ id: crypto.randomUUID(), ...line }));
+  await orderRepository.createOrderItems(orderId, itemsToInsert);
+
+  const modifiersToInsert = itemsToInsert.flatMap((item) =>
+    item.modifiers.map((modifier) => ({ orderItemId: item.id, ...modifier }))
+  );
+  await orderRepository.createOrderItemModifiers(modifiersToInsert);
+}
+
 export async function createOrder(actor, shopId, data) {
   await requireAccessTill(actor, shopId);
 
@@ -214,17 +239,7 @@ export async function createOrder(actor, shopId, data) {
     createdByActorId: actor.id,
   });
 
-  // Pre-generated, not left to the DB default - verified empirically that
-  // explicit client-generated ids land correctly in a bulk unnest()
-  // insert. Needed BEFORE order_item_modifiers can be inserted, since each
-  // modifier row references its own line's id.
-  const itemsToInsert = resolvedLines.map((line) => ({ id: crypto.randomUUID(), ...line }));
-  await orderRepository.createOrderItems(order.id, itemsToInsert);
-
-  const modifiersToInsert = itemsToInsert.flatMap((item) =>
-    item.modifiers.map((modifier) => ({ orderItemId: item.id, ...modifier }))
-  );
-  await orderRepository.createOrderItemModifiers(modifiersToInsert);
+  await writeResolvedItems(order.id, resolvedLines);
 
   return fetchOrderDetail(shopId, order.id);
 }
@@ -238,4 +253,29 @@ export async function listOrders(actor, shopId) {
 export async function getOrder(actor, shopId, orderId) {
   await requireAccessTill(actor, shopId);
   return fetchOrderDetail(shopId, orderId);
+}
+
+/**
+ * Appends items to an order that's already open (9.2) - a real gap 9.1
+ * left, since order creation only accepted items up front with no way to
+ * add more afterward. Only valid while status === 'open': ORDER_STATUSES
+ * has just that one value today (confirmed minimal-for-now in 9.1), so
+ * this check can't actually fail yet, but it's written now because 9.4
+ * (cancellation) will introduce a status where adding items must be
+ * rejected, and this is the natural place for that check to already exist.
+ */
+export async function addItemsToOrder(actor, shopId, orderId, data) {
+  await requireAccessTill(actor, shopId);
+  const order = await getOrderOrThrow(shopId, orderId);
+
+  if (order.status !== 'open') {
+    throw new AppError(`Cannot add items to an order with status '${order.status}'`, 400);
+  }
+
+  const resolvedMenu = await shopMenuService.getResolvedMenu(actor, shopId);
+  const resolvedLines = data.items.map((line) => resolveOrderLine(resolvedMenu, line));
+
+  await writeResolvedItems(order.id, resolvedLines);
+
+  return fetchOrderDetail(shopId, order.id);
 }

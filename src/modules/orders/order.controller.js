@@ -15,3 +15,13 @@ export const getOrder = asyncHandler(async (req, res) => {
   const order = await orderService.getOrder(req.actor, req.params.shopId, req.params.orderId);
   res.status(200).json(order);
 });
+
+export const addItemsToOrder = asyncHandler(async (req, res) => {
+  const order = await orderService.addItemsToOrder(
+    req.actor,
+    req.params.shopId,
+    req.params.orderId,
+    req.body
+  );
+  res.status(201).json(order);
+});

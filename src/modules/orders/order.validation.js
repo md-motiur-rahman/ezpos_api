@@ -39,3 +39,11 @@ export const orderIdParamSchema = z.object({
   shopId: z.string().uuid('Invalid shop id'),
   orderId: z.string().uuid('Invalid order id'),
 });
+
+// --- Adding items to an already-open order (9.2) ---
+
+// Reuses the exact same per-item shape as createOrderSchema's items array -
+// no new rules, just a different endpoint to apply them at.
+export const addOrderItemsSchema = z.object({
+  items: z.array(orderItemSchema).min(1, 'Provide at least one item to add'),
+});

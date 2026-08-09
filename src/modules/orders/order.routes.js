@@ -2,7 +2,11 @@ import { Router } from 'express';
 import { requireStaffOrOwnerAuth } from '../../middleware/requireStaffOrOwnerAuth.js';
 import { validateBody, validateParams } from '../../middleware/validate.js';
 import * as orderController from './order.controller.js';
-import { createOrderSchema, orderIdParamSchema } from './order.validation.js';
+import {
+  createOrderSchema,
+  orderIdParamSchema,
+  addOrderItemsSchema,
+} from './order.validation.js';
 import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
 
 /**
@@ -29,5 +33,14 @@ router.post(
 );
 router.get('/', validateParams(shopIdOnlyParamSchema), orderController.listOrders);
 router.get('/:orderId', validateParams(orderIdParamSchema), orderController.getOrder);
+
+// --- Adding items to an already-open order (9.2) ---
+
+router.post(
+  '/:orderId/items',
+  validateParams(orderIdParamSchema),
+  validateBody(addOrderItemsSchema),
+  orderController.addItemsToOrder
+);
 
 export default router;

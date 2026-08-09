@@ -52,3 +52,31 @@ export const attachSupplierBodySchema = z.object({
 export const updateItemSupplierBodySchema = z.object({
   isDefault: z.boolean(),
 });
+
+// --- Ingredient <-> inventory item linking (7.9) ---
+
+export const itemIngredientParamSchema = z.object({
+  shopId: z.string().uuid('Invalid shop id'),
+  itemId: z.string().uuid('Invalid inventory item id'),
+  ingredientId: z.string().uuid('Invalid ingredient id'),
+});
+
+// Strictly positive, not just non-negative: a factor of 0 would mean a
+// recipe ingredient consumes no stock at all, which is what NOT linking it
+// already expresses - and it would silently produce zero-deduction rows
+// that look like successful deductions in the engine's return value.
+const conversionFactorSchema = z
+  .number()
+  .positive('conversionFactor must be greater than zero');
+
+// Optional on link - defaults to 1 (the "recipe unit and stock unit are the
+// same thing" case, which is the common one).
+export const linkIngredientBodySchema = z.object({
+  conversionFactor: conversionFactorSchema.optional(),
+});
+
+// Required on PATCH - same reasoning as updateItemSupplierBodySchema above:
+// this endpoint exists solely to change that one value.
+export const updateIngredientLinkBodySchema = z.object({
+  conversionFactor: conversionFactorSchema,
+});

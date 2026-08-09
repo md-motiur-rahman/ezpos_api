@@ -4,6 +4,8 @@ import { resolveActorAuthority, assertHasPermission } from '../staff/actorAuthor
 import * as inventoryRepository from './inventory.repository.js';
 import * as supplierRepository from '../suppliers/supplier.repository.js';
 import * as companyRepository from '../company/company.repository.js';
+import * as shopRepository from '../shop/shop.repository.js';
+import * as menuRepository from '../menu/menu.repository.js';
 
 /**
  * Unlike Module 6's menu, reads here are NOT open to every in-scope actor -
@@ -180,6 +182,107 @@ export async function listItemSuppliers(actor, shopId, itemId) {
 
   const suppliers = await inventoryRepository.listSuppliersForItem(itemId);
   return suppliers.map(toItemSupplierResponse);
+}
+
+// --- Ingredient <-> inventory item linking (7.9) ---
+
+function toIngredientLinkResponse(row) {
+  return {
+    ingredientId: row.id,
+    name: row.name,
+    // The ingredient's own recipe unit (e.g. 'g'), which is NOT necessarily
+    // the inventory item's stock unit - that difference is the entire
+    // reason conversionFactor exists.
+    unit: row.unit,
+    allergens: row.allergens,
+    conversionFactor: Number(row.conversion_factor),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * Ingredients are company-level master data but this link is shop-level, so
+ * "does this ingredient exist" has to be asked in the context of the shop's
+ * OWNING company - resolved through the shop rather than the actor, since a
+ * staff actor has no company of their own to check against.
+ */
+async function getIngredientForShopOrThrow(shopId, ingredientId) {
+  const shop = await shopRepository.findActiveShopById(shopId);
+  if (!shop) {
+    throw new AppError('Shop not found', 404);
+  }
+  const ingredient = await menuRepository.findActiveIngredientByIdForCompany(
+    ingredientId,
+    shop.company_id
+  );
+  if (!ingredient) {
+    throw new AppError('Ingredient not found', 404);
+  }
+  return ingredient;
+}
+
+export async function linkIngredientToItem(actor, shopId, itemId, ingredientId, conversionFactor) {
+  await requireManageInventory(actor, shopId);
+  await getItemOrThrow(shopId, itemId);
+  await getIngredientForShopOrThrow(shopId, ingredientId);
+
+  try {
+    await inventoryRepository.linkIngredientToInventoryItem(
+      shopId,
+      ingredientId,
+      itemId,
+      conversionFactor
+    );
+  } catch (err) {
+    if (err.code === POSTGRES_UNIQUE_VIOLATION) {
+      // Deliberately worded around the ingredient, not the pair: the
+      // constraint is (shop, ingredient), so this fires even when the
+      // caller is linking to a DIFFERENT inventory item than the existing
+      // link points at. "Already linked to this item" would be misleading.
+      throw new AppError('This ingredient is already linked to an inventory item in this shop', 409);
+    }
+    throw err;
+  }
+}
+
+export async function updateIngredientLink(actor, shopId, itemId, ingredientId, conversionFactor) {
+  await requireManageInventory(actor, shopId);
+  await getItemOrThrow(shopId, itemId);
+  await getIngredientForShopOrThrow(shopId, ingredientId);
+
+  const updated = await inventoryRepository.updateIngredientLinkConversionFactor(
+    shopId,
+    ingredientId,
+    itemId,
+    conversionFactor
+  );
+  if (!updated) {
+    throw new AppError('This ingredient is not linked to this item', 404);
+  }
+}
+
+export async function unlinkIngredientFromItem(actor, shopId, itemId, ingredientId) {
+  await requireManageInventory(actor, shopId);
+  await getItemOrThrow(shopId, itemId);
+  await getIngredientForShopOrThrow(shopId, ingredientId);
+
+  const unlinked = await inventoryRepository.unlinkIngredientFromInventoryItem(
+    shopId,
+    ingredientId,
+    itemId
+  );
+  if (!unlinked) {
+    throw new AppError('This ingredient is not linked to this item', 404);
+  }
+}
+
+export async function listIngredientLinksForItem(actor, shopId, itemId) {
+  await requireViewInventory(actor, shopId);
+  await getItemOrThrow(shopId, itemId);
+
+  const links = await inventoryRepository.listIngredientLinksForItem(shopId, itemId);
+  return links.map(toIngredientLinkResponse);
 }
 
 // --- Cross-shop overview (7.8) ---

@@ -70,6 +70,49 @@ export const listItemSuppliers = asyncHandler(async (req, res) => {
   res.status(200).json(suppliers);
 });
 
+// --- Ingredient <-> inventory item linking (7.9) ---
+
+export const linkIngredientToItem = asyncHandler(async (req, res) => {
+  await inventoryService.linkIngredientToItem(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId,
+    req.params.ingredientId,
+    req.body.conversionFactor
+  );
+  res.status(201).json({ message: 'Ingredient linked.' });
+});
+
+export const updateIngredientLink = asyncHandler(async (req, res) => {
+  await inventoryService.updateIngredientLink(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId,
+    req.params.ingredientId,
+    req.body.conversionFactor
+  );
+  res.status(200).json({ message: 'Ingredient link updated.' });
+});
+
+export const unlinkIngredientFromItem = asyncHandler(async (req, res) => {
+  await inventoryService.unlinkIngredientFromItem(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId,
+    req.params.ingredientId
+  );
+  res.status(200).json({ message: 'Ingredient unlinked.' });
+});
+
+export const listIngredientLinksForItem = asyncHandler(async (req, res) => {
+  const links = await inventoryService.listIngredientLinksForItem(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId
+  );
+  res.status(200).json(links);
+});
+
 // --- Cross-shop overview (7.8) ---
 
 export const listItemsForCompany = asyncHandler(async (req, res) => {

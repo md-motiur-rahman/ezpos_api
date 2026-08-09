@@ -10,6 +10,9 @@ import {
   itemSupplierParamSchema,
   attachSupplierBodySchema,
   updateItemSupplierBodySchema,
+  itemIngredientParamSchema,
+  linkIngredientBodySchema,
+  updateIngredientLinkBodySchema,
 } from './inventory.validation.js';
 import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
 
@@ -74,6 +77,37 @@ router.delete(
   '/:itemId/suppliers/:supplierId',
   validateParams(itemSupplierParamSchema),
   inventoryController.detachSupplierFromItem
+);
+
+// --- Ingredient <-> inventory item linking (7.9) ---
+//
+// Hung off the inventory item rather than the ingredient, even though the
+// uniqueness constraint is per-ingredient: the link is shop-scoped data and
+// this router is already the shop-scoped one. The ingredient side lives
+// under /api/companies/mine (company-level master data), which has no shop
+// in its path to scope a link by.
+
+router.post(
+  '/:itemId/ingredient-links/:ingredientId',
+  validateParams(itemIngredientParamSchema),
+  validateBody(linkIngredientBodySchema),
+  inventoryController.linkIngredientToItem
+);
+router.get(
+  '/:itemId/ingredient-links',
+  validateParams(inventoryItemIdParamSchema),
+  inventoryController.listIngredientLinksForItem
+);
+router.patch(
+  '/:itemId/ingredient-links/:ingredientId',
+  validateParams(itemIngredientParamSchema),
+  validateBody(updateIngredientLinkBodySchema),
+  inventoryController.updateIngredientLink
+);
+router.delete(
+  '/:itemId/ingredient-links/:ingredientId',
+  validateParams(itemIngredientParamSchema),
+  inventoryController.unlinkIngredientFromItem
 );
 
 export default router;

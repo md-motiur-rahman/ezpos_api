@@ -163,6 +163,97 @@ export async function findActiveItemsByIdsForShop(shopId, itemIds) {
   return rows;
 }
 
+// --- Ingredient <-> inventory item linking (7.9) ---
+
+const INGREDIENT_LINK_COLUMNS = `id, shop_id, ingredient_id, inventory_item_id,
+                                 conversion_factor, created_at, updated_at`;
+
+/**
+ * Throws Postgres unique-violation (23505) if this ingredient is already
+ * linked to ANY inventory item in this shop - the (shop_id, ingredient_id)
+ * unique constraint, not a per-pair one, since the deduction engine needs
+ * exactly one answer per ingredient.
+ *
+ * Not built on attachRelationship/attachRelationshipWithQuantity: those
+ * assume a two-FK-column join table, and this one is keyed on three
+ * (shop + ingredient + item). Writing it out is clearer than widening a
+ * shared helper for a single caller.
+ */
+export async function linkIngredientToInventoryItem(
+  shopId,
+  ingredientId,
+  inventoryItemId,
+  conversionFactor
+) {
+  const { rows } = await query(
+    `INSERT INTO ingredient_inventory_links
+       (shop_id, ingredient_id, inventory_item_id, conversion_factor)
+     VALUES ($1, $2, $3, $4)
+     RETURNING ${INGREDIENT_LINK_COLUMNS}`,
+    [shopId, ingredientId, inventoryItemId, conversionFactor ?? 1]
+  );
+  return rows[0];
+}
+
+export async function updateIngredientLinkConversionFactor(
+  shopId,
+  ingredientId,
+  inventoryItemId,
+  conversionFactor
+) {
+  const { rows } = await query(
+    `UPDATE ingredient_inventory_links
+     SET conversion_factor = $4, updated_at = now()
+     WHERE shop_id = $1 AND ingredient_id = $2 AND inventory_item_id = $3
+     RETURNING ${INGREDIENT_LINK_COLUMNS}`,
+    [shopId, ingredientId, inventoryItemId, conversionFactor]
+  );
+  return rows[0] ?? null;
+}
+
+export async function unlinkIngredientFromInventoryItem(shopId, ingredientId, inventoryItemId) {
+  const { rows } = await query(
+    `DELETE FROM ingredient_inventory_links
+     WHERE shop_id = $1 AND ingredient_id = $2 AND inventory_item_id = $3
+     RETURNING id`,
+    [shopId, ingredientId, inventoryItemId]
+  );
+  return rows[0] ?? null;
+}
+
+/** Each row is the ingredient's own fields plus this link's conversion factor. */
+export async function listIngredientLinksForItem(shopId, inventoryItemId) {
+  const { rows } = await query(
+    `SELECT i.id, i.company_id, i.name, i.unit, i.allergens,
+            iil.conversion_factor, iil.created_at, iil.updated_at
+     FROM ingredient_inventory_links iil
+     JOIN ingredients i ON i.id = iil.ingredient_id AND i.deleted_at IS NULL
+     WHERE iil.shop_id = $1 AND iil.inventory_item_id = $2
+     ORDER BY i.name`,
+    [shopId, inventoryItemId]
+  );
+  return rows;
+}
+
+/**
+ * Bulk resolve ingredient -> (inventory item, conversion factor) for one
+ * shop, the lookup the deduction engine (7.9) runs once per sale rather
+ * than per ingredient. Joins inventory_items so an ingredient linked to a
+ * since-soft-deleted stock item comes back as unlinked (no row) rather
+ * than as a link pointing at a dead item - the engine then reports it as
+ * skipped, which is the honest answer.
+ */
+export async function findIngredientLinksForShop(shopId, ingredientIds) {
+  const { rows } = await query(
+    `SELECT iil.ingredient_id, iil.inventory_item_id, iil.conversion_factor
+     FROM ingredient_inventory_links iil
+     JOIN inventory_items ii ON ii.id = iil.inventory_item_id AND ii.deleted_at IS NULL
+     WHERE iil.shop_id = $1 AND iil.ingredient_id = ANY($2::uuid[])`,
+    [shopId, ingredientIds]
+  );
+  return rows;
+}
+
 // --- Cross-shop overview (7.8) ---
 
 /**

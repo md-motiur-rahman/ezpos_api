@@ -3,6 +3,7 @@ import { PERMISSIONS } from '../staff/permissions.js';
 import { resolveActorAuthority, assertHasPermission } from '../staff/actorAuthority.js';
 import * as inventoryRepository from '../inventory/inventory.repository.js';
 import * as scanRepository from './inventoryScan.repository.js';
+import * as wastageLogRepository from '../wastage/wastageLog.repository.js';
 
 /**
  * Deliberately PERFORM_HEALTH_SAFETY, not VIEW_INVENTORY - confirmed
@@ -179,4 +180,121 @@ export async function listPrints(actor, shopId, scanId) {
 
   const prints = await scanRepository.listPrintsForScan(scanId, shopId);
   return prints.map((printRow) => toPrintResponse(printRow, response));
+}
+
+// --- Auto-flagging + resolution (8.4) ---
+
+const POSTGRES_UNIQUE_VIOLATION = '23505';
+
+/**
+ * Deliberately a STANDALONE function, not a reuse/refactor of
+ * calculateExpiresOn above - that function is 8.2's, already shipped and
+ * tested, and is left completely untouched here. A few duplicated lines of
+ * "today in UTC" is a better trade than touching previously-approved code
+ * for a one-line saving. Same UTC-calendar-terms reasoning as
+ * calculateExpiresOn: stable regardless of server timezone, and this is
+ * the single value compared against `expires_on` both here and in the
+ * repository's listExpiredUnresolvedScansForShop query.
+ */
+function todayUtcDateString() {
+  const now = new Date();
+  const year = now.getUTCFullYear();
+  const month = String(now.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(now.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * The auto-flagged list itself - confirmed directly to be READ-ONLY, no
+ * automatic wastage creation. There's no batch/lot quantity tracked
+ * anywhere in this system (inventory_items.quantity_on_hand is a single
+ * aggregate, not per-delivery), so there is no quantity the system could
+ * correctly guess for an auto-generated wastage entry - a human confirms
+ * the real amount and logs it via 7.7, unchanged by this module.
+ */
+export async function listExpiredScans(actor, shopId) {
+  await requirePerformHealthSafety(actor, shopId);
+  const scans = await scanRepository.listExpiredUnresolvedScansForShop(
+    shopId,
+    todayUtcDateString()
+  );
+  return scans.map(toResponse);
+}
+
+function toResolutionResponse(row) {
+  return {
+    id: row.id,
+    scanId: row.scan_id,
+    wastageLogId: row.wastage_log_id,
+    notes: row.notes,
+    resolvedAt: row.resolved_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * Confirms a wastageLogId (if supplied) actually applies to THIS scan's
+ * item before accepting the link - without this, nothing stops someone
+ * pasting in a wastage log for a completely unrelated item. A wastage log
+ * can cover several different items across its line items (7.5-style
+ * multi-line submission), so "belongs to this shop" alone isn't enough;
+ * at least one of its lines has to reference the same inventory_item_id.
+ */
+async function assertWastageLogCoversItem(wastageLogId, shopId, inventoryItemId) {
+  const wastageLog = await wastageLogRepository.findWastageLogByIdForShop(wastageLogId, shopId);
+  if (!wastageLog) {
+    throw new AppError('Wastage log not found', 404);
+  }
+  const items = await wastageLogRepository.listItemsForWastageLog(wastageLogId);
+  const covers = items.some((item) => item.inventory_item_id === inventoryItemId);
+  if (!covers) {
+    throw new AppError('This wastage log does not include this item', 400);
+  }
+}
+
+/**
+ * Closes an auto-flagged scan. Confirmed directly: wastageLogId is
+ * OPTIONAL - a flag can be resolved either by pointing at the 7.7 wastage
+ * log that disposed of the item, or dismissed with no wastage behind it at
+ * all (false alarm, already used up, mis-scanned). This function never
+ * creates a wastage_log itself - that stays entirely 7.7's job.
+ */
+export async function resolveScan(actor, shopId, scanId, { wastageLogId, notes }) {
+  await requirePerformHealthSafety(actor, shopId);
+  const scan = await getScanOrThrow(shopId, scanId);
+
+  const response = toResponse(scan);
+  if (response.expiresOn > todayUtcDateString()) {
+    throw new AppError('This item has not expired yet', 400);
+  }
+
+  if (wastageLogId) {
+    await assertWastageLogCoversItem(wastageLogId, shopId, scan.inventory_item_id);
+  }
+
+  try {
+    const resolution = await scanRepository.createResolution(shopId, {
+      scanId,
+      wastageLogId,
+      notes,
+    });
+    return toResolutionResponse(resolution);
+  } catch (err) {
+    if (err.code === POSTGRES_UNIQUE_VIOLATION) {
+      throw new AppError('This scan has already been resolved', 409);
+    }
+    throw err;
+  }
+}
+
+export async function getResolution(actor, shopId, scanId) {
+  await requirePerformHealthSafety(actor, shopId);
+  await getScanOrThrow(shopId, scanId);
+
+  const resolution = await scanRepository.findResolutionByScanId(scanId, shopId);
+  if (!resolution) {
+    throw new AppError('This scan has not been resolved', 404);
+  }
+  return toResolutionResponse(resolution);
 }

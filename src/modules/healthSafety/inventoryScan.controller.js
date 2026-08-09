@@ -34,3 +34,27 @@ export const listPrints = asyncHandler(async (req, res) => {
   const prints = await inventoryScanService.listPrints(req.actor, req.params.shopId, req.params.scanId);
   res.status(200).json(prints);
 });
+
+export const listExpiredScans = asyncHandler(async (req, res) => {
+  const scans = await inventoryScanService.listExpiredScans(req.actor, req.params.shopId);
+  res.status(200).json(scans);
+});
+
+export const resolveScan = asyncHandler(async (req, res) => {
+  const resolution = await inventoryScanService.resolveScan(
+    req.actor,
+    req.params.shopId,
+    req.params.scanId,
+    req.body
+  );
+  res.status(201).json(resolution);
+});
+
+export const getResolution = asyncHandler(async (req, res) => {
+  const resolution = await inventoryScanService.getResolution(
+    req.actor,
+    req.params.shopId,
+    req.params.scanId
+  );
+  res.status(200).json(resolution);
+});

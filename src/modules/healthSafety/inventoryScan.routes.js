@@ -2,7 +2,11 @@ import { Router } from 'express';
 import { requireStaffOrOwnerAuth } from '../../middleware/requireStaffOrOwnerAuth.js';
 import { validateBody, validateParams } from '../../middleware/validate.js';
 import * as inventoryScanController from './inventoryScan.controller.js';
-import { createScanSchema, scanIdParamSchema } from './inventoryScan.validation.js';
+import {
+  createScanSchema,
+  scanIdParamSchema,
+  resolveScanSchema,
+} from './inventoryScan.validation.js';
 import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
 
 /**
@@ -35,6 +39,10 @@ router.get('/', validateParams(shopIdOnlyParamSchema), inventoryScanController.l
 // principle as every /api/shops/:shopId/* mount in app.js, just scoped to
 // this one router instead of the whole app.
 router.get('/latest', validateParams(shopIdOnlyParamSchema), inventoryScanController.listLatestScans);
+// Same reasoning as '/latest' above, and registered for the same reason -
+// '/expired' must come before '/:scanId' too, or it would be swallowed the
+// identical way.
+router.get('/expired', validateParams(shopIdOnlyParamSchema), inventoryScanController.listExpiredScans);
 router.get('/:scanId', validateParams(scanIdParamSchema), inventoryScanController.getScan);
 
 // --- Print log (8.3) ---
@@ -48,6 +56,20 @@ router.get(
   '/:scanId/prints',
   validateParams(scanIdParamSchema),
   inventoryScanController.listPrints
+);
+
+// --- Auto-flagging + resolution (8.4) ---
+
+router.post(
+  '/:scanId/resolve',
+  validateParams(scanIdParamSchema),
+  validateBody(resolveScanSchema),
+  inventoryScanController.resolveScan
+);
+router.get(
+  '/:scanId/resolution',
+  validateParams(scanIdParamSchema),
+  inventoryScanController.getResolution
 );
 
 export default router;

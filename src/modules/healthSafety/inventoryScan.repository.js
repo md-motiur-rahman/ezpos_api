@@ -113,3 +113,70 @@ export async function listPrintsForScan(scanId, shopId) {
   );
   return rows;
 }
+
+// --- Auto-flagging (8.4) ---
+
+/**
+ * The "auto-flagged" list: one row per item whose MOST RECENT scan has
+ * passed its expires_on and has no resolution yet. The latest-per-item
+ * pick happens in the `latest` CTE FIRST, then expiry/resolution filtering
+ * applies to that result - NOT the other way around. Verified empirically
+ * before this was relied on: filtering `expires_on <= today` before the
+ * DISTINCT ON would pick an item's most recent EXPIRED scan even when a
+ * newer, non-expired rescan of the same item exists and should supersede
+ * it. `today` is passed in as a parameter (a 'YYYY-MM-DD' string computed
+ * the same UTC-calendar way as 8.2's expires_on) rather than compared
+ * against Postgres's own CURRENT_DATE, so there's exactly one definition
+ * of "today" behind both the calculation (8.2) and this check, not two
+ * that could silently drift apart across server/DB timezone settings.
+ */
+export async function listExpiredUnresolvedScansForShop(shopId, todayUtcDateString) {
+  const { rows } = await query(
+    `WITH latest AS (
+       SELECT DISTINCT ON (s.inventory_item_id)
+              ${SCAN_COLUMNS}, ii.name AS item_name, ii.unit AS item_unit
+       FROM inventory_item_scans s
+       ${ITEM_JOIN}
+       WHERE s.shop_id = $1
+       ORDER BY s.inventory_item_id, s.scanned_at DESC
+     )
+     SELECT latest.*
+     FROM latest
+     LEFT JOIN inventory_item_scan_resolutions r ON r.scan_id = latest.id
+     WHERE latest.expires_on <= $2 AND r.id IS NULL
+     ORDER BY latest.expires_on ASC`,
+    [shopId, todayUtcDateString]
+  );
+  return rows;
+}
+
+// --- Resolutions (8.4) ---
+
+const RESOLUTION_COLUMNS = `id, scan_id, shop_id, wastage_log_id, notes, resolved_at, created_at, updated_at`;
+
+/**
+ * Immutable once created - no update/delete function here either, same
+ * "already-applied event" reasoning as the scan and print tables. The
+ * unique constraint on scan_id (one resolution per scan) is enforced by
+ * the DB; the service layer catches the 23505 and turns it into a 409,
+ * same established pattern as every other unique-constraint case in this
+ * project (7.4's supplier links, 8.2's sku).
+ */
+export async function createResolution(shopId, { scanId, wastageLogId, notes }) {
+  const { rows } = await query(
+    `INSERT INTO inventory_item_scan_resolutions (scan_id, shop_id, wastage_log_id, notes)
+     VALUES ($1, $2, $3, $4)
+     RETURNING ${RESOLUTION_COLUMNS}`,
+    [scanId, shopId, wastageLogId ?? null, notes ?? null]
+  );
+  return rows[0];
+}
+
+export async function findResolutionByScanId(scanId, shopId) {
+  const { rows } = await query(
+    `SELECT ${RESOLUTION_COLUMNS} FROM inventory_item_scan_resolutions
+     WHERE scan_id = $1 AND shop_id = $2`,
+    [scanId, shopId]
+  );
+  return rows[0] ?? null;
+}

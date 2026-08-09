@@ -75,3 +75,15 @@ const clearDiscountSchema = z.object({
 });
 
 export const discountInputSchema = z.union([setDiscountSchema, clearDiscountSchema]);
+
+// --- Cancellation (whole order) and void (single line item) (9.4) ---
+
+// Same shape for both actions - reused as-is, same "one input schema, two
+// endpoints" pattern as discountInputSchema above. wasPrepped is REQUIRED,
+// not optional or defaulted: no KDS exists yet to detect prep state
+// automatically, so this is a staff declaration that must be explicit
+// (confirmed directly), never silently assumed either way.
+export const cancellationInputSchema = z.object({
+  wasPrepped: z.boolean(),
+  reason: z.string().trim().min(1, 'reason cannot be empty').optional(),
+});

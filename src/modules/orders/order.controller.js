@@ -46,3 +46,24 @@ export const setOrderItemDiscount = asyncHandler(async (req, res) => {
   );
   res.status(200).json(order);
 });
+
+export const cancelOrder = asyncHandler(async (req, res) => {
+  const order = await orderService.cancelOrder(
+    req.actor,
+    req.params.shopId,
+    req.params.orderId,
+    req.body
+  );
+  res.status(200).json(order);
+});
+
+export const voidOrderItem = asyncHandler(async (req, res) => {
+  const order = await orderService.voidOrderItem(
+    req.actor,
+    req.params.shopId,
+    req.params.orderId,
+    req.params.orderItemId,
+    req.body
+  );
+  res.status(200).json(order);
+});

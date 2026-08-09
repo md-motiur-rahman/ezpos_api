@@ -12,7 +12,9 @@ export const ORDER_TYPES = Object.freeze(['dine_in', 'takeaway']);
  * this array when those submodules are actually designed, rather than 9.1
  * guessing at states they haven't been scoped yet to need.
  */
-export const ORDER_STATUSES = Object.freeze(['open']);
+// 'cancelled' added in 9.4 - the value 9.1/9.2/9.3 wrote their status === 'open'
+// guards in anticipation of, without knowing what it would be called yet.
+export const ORDER_STATUSES = Object.freeze(['open', 'cancelled']);
 
 /** 9.3 - percentage is 0-100 of the amount it's applied against; fixed is a currency amount. */
 export const DISCOUNT_TYPES = Object.freeze(['percentage', 'fixed']);

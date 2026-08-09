@@ -86,12 +86,40 @@ function computeDiscountAmount(baseAmount, discount) {
   return Number(amount.toFixed(2));
 }
 
+/** order_items only (9.4) - null when this line has never been voided. */
+function toVoidResponse(row) {
+  if (!row.voided_at) {
+    return null;
+  }
+  return {
+    voidedAt: row.voided_at,
+    voidedByActorType: row.voided_by_actor_type,
+    voidedByActorId: row.voided_by_actor_id,
+    reason: row.void_reason,
+    wasPrepped: row.was_prepped,
+  };
+}
+
+/** orders only (9.4) - null when this order has never been cancelled. */
+function toCancellationResponse(order) {
+  if (!order.cancelled_at) {
+    return null;
+  }
+  return {
+    cancelledAt: order.cancelled_at,
+    cancelledByActorType: order.cancelled_by_actor_type,
+    cancelledByActorId: order.cancelled_by_actor_id,
+    reason: order.cancellation_reason,
+    wasPrepped: order.was_prepped,
+  };
+}
+
 function toItemResponse(row, modifiers) {
   const unitPrice = Number(row.unit_price);
   const modifierTotal = modifiers.reduce((sum, m) => sum + m.priceDelta, 0);
   // Computed, not stored - "derive, don't store", same philosophy as
   // isLowStock/discrepancy/totalCost elsewhere in this project. Unchanged
-  // by 9.3: still the PRE-discount line amount, exactly as before.
+  // by 9.3/9.4: still the PRE-discount line amount, exactly as before.
   const lineTotal = Number(((unitPrice + modifierTotal) * row.quantity).toFixed(2));
   const discount = toDiscountResponse(row);
   const discountAmount = computeDiscountAmount(lineTotal, discount);
@@ -111,14 +139,22 @@ function toItemResponse(row, modifiers) {
     // before this submodule.
     discount,
     total: Number((lineTotal - discountAmount).toFixed(2)),
+    // New in 9.4 - null unless this line has been voided.
+    void: toVoidResponse(row),
     createdAt: row.created_at,
   };
 }
 
 function toDetailResponse(order, items) {
-  // Unchanged by 9.3: still the sum of pre-discount lineTotals.
-  const subtotal = items.reduce((sum, item) => sum + item.lineTotal, 0);
-  const itemDiscountTotal = items.reduce((sum, item) => sum + (item.lineTotal - item.total), 0);
+  // Voided items (9.4) are kept in the response for audit but excluded from
+  // every total below - they're no longer being charged. 9.1/9.2/9.3 never
+  // produced a voided item, so this filter is a no-op for their tests and
+  // changes nothing about previously-approved totals.
+  const activeItems = items.filter((item) => !item.void);
+  // Unchanged by 9.3/9.4: still the sum of pre-discount lineTotals, over
+  // whichever items are actually still active.
+  const subtotal = activeItems.reduce((sum, item) => sum + item.lineTotal, 0);
+  const itemDiscountTotal = activeItems.reduce((sum, item) => sum + (item.lineTotal - item.total), 0);
   const subtotalAfterItemDiscounts = subtotal - itemDiscountTotal;
   const discount = toDiscountResponse(order);
   const discountAmount = computeDiscountAmount(subtotalAfterItemDiscounts, discount);
@@ -137,15 +173,22 @@ function toDetailResponse(order, items) {
     status: order.status,
     createdByActorType: order.created_by_actor_type,
     createdByActorId: order.created_by_actor_id,
+    // Full list, including any voided lines (audit trail) - only the
+    // totals below exclude them.
     items,
-    // Pre-tax, pre-discount - deliberately unchanged. VAT (9.8) is still a
-    // separate, not-yet-built submodule; this is not a final total.
+    // Pre-tax, pre-discount, active-items-only - deliberately unchanged in
+    // meaning. VAT (9.8) is still a separate, not-yet-built submodule; this
+    // is not a final total. Cancelling the whole order does NOT zero this
+    // out - `status`/`cancellation` are the authoritative "not charged"
+    // signal, this stays a record of what the order contained.
     subtotal: Number(subtotal.toFixed(2)),
     // New in 9.3 - all zero/null for an order with no discounts anywhere.
     itemDiscountTotal: Number(itemDiscountTotal.toFixed(2)),
     discount,
     discountAmount,
     total: Number(total.toFixed(2)),
+    // New in 9.4 - null unless this order has been cancelled.
+    cancellation: toCancellationResponse(order),
     createdAt: order.created_at,
     updatedAt: order.updated_at,
   };
@@ -414,6 +457,11 @@ export async function setOrderItemDiscount(actor, shopId, orderId, orderItemId, 
   if (!item) {
     throw new AppError('Order item not found', 404);
   }
+  // 9.4 - a voided item is no longer part of the order's charge, so
+  // discounting it is meaningless. The only touch 9.4 makes to 9.3's code.
+  if (item.voided_at) {
+    throw new AppError('Cannot modify the discount on a voided item', 400);
+  }
 
   if (data.discountType === null) {
     await orderRepository.setOrderItemDiscount(item.id, CLEARED_DISCOUNT);
@@ -429,6 +477,74 @@ export async function setOrderItemDiscount(actor, shopId, orderId, orderItemId, 
     discountType: data.discountType,
     discountValue: data.discountValue,
     reason: data.reason ?? null,
+    actorType: actor.type,
+    actorId: actor.id,
+  });
+
+  return fetchOrderDetail(shopId, order.id);
+}
+
+/** Shared by cancelOrder and voidOrderItem below (9.4) - both are one-directional actions only valid while the order is still open. */
+function requireOpenOrder(order) {
+  if (order.status !== 'open') {
+    throw new AppError(`Cannot modify an order with status '${order.status}'`, 400);
+  }
+}
+
+/**
+ * Cancels the whole order (9.4). `wasPrepped` is a required staff
+ * declaration, not auto-detected - no KDS exists yet to know whether any
+ * item had started prep (confirmed directly). One-directional: there's no
+ * un-cancel, matching this project's "no reversal mechanism" philosophy for
+ * an already-applied state change.
+ */
+export async function cancelOrder(actor, shopId, orderId, data) {
+  await requireAccessTill(actor, shopId);
+  const order = await getOrderOrThrow(shopId, orderId);
+  requireOpenOrder(order);
+
+  await orderRepository.cancelOrder(order.id, {
+    reason: data.reason ?? null,
+    wasPrepped: data.wasPrepped,
+    actorType: actor.type,
+    actorId: actor.id,
+  });
+
+  return fetchOrderDetail(shopId, order.id);
+}
+
+/**
+ * Voids one line item (9.4), independent of the rest of the order. Blocks
+ * voiding the LAST remaining active item - confirmed directly as the
+ * natural counterpart to createOrderSchema requiring at least one item at
+ * creation; cancelling the whole order is the correct action once nothing
+ * would be left.
+ */
+export async function voidOrderItem(actor, shopId, orderId, orderItemId, data) {
+  await requireAccessTill(actor, shopId);
+  const order = await getOrderOrThrow(shopId, orderId);
+  requireOpenOrder(order);
+
+  const item = await orderRepository.findOrderItemForOrder(orderItemId, order.id);
+  if (!item) {
+    throw new AppError('Order item not found', 404);
+  }
+  if (item.voided_at) {
+    throw new AppError('This item has already been voided', 400);
+  }
+
+  const allItems = await orderRepository.listItemsForOrder(order.id);
+  const activeCount = allItems.filter((row) => !row.voided_at).length;
+  if (activeCount <= 1) {
+    throw new AppError(
+      'Cannot void the last remaining item on an order - cancel the order instead',
+      400
+    );
+  }
+
+  await orderRepository.voidOrderItem(item.id, {
+    reason: data.reason ?? null,
+    wasPrepped: data.wasPrepped,
     actorType: actor.type,
     actorId: actor.id,
   });

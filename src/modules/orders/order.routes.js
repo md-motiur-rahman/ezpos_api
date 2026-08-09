@@ -8,6 +8,7 @@ import {
   addOrderItemsSchema,
   orderItemIdParamSchema,
   discountInputSchema,
+  cancellationInputSchema,
 } from './order.validation.js';
 import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
 
@@ -18,10 +19,11 @@ import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
  * requireAuth, so staff sessions can reach it.
  *
  * ACCESS_TILL gates every route here, including GET - same "reading and
- * creating share one permission gate" precedent as 7.7's wastage logs.
- * No PATCH, no DELETE - 9.4 (cancellation) and 9.5 (payment) will add
- * their own status-changing actions later; this submodule is creation +
- * read only.
+ * creating share one permission gate" precedent as 7.7's wastage logs -
+ * except the discount routes (9.3), which are APPLY_DISCOUNT-gated instead.
+ * No DELETE anywhere - cancellation/void (9.4) are their own explicit
+ * actions, not a resource deletion, same "no reversal mechanism, correct
+ * via a new action" philosophy as wastage/receipts.
  */
 const router = Router({ mergeParams: true });
 
@@ -59,6 +61,22 @@ router.patch(
   validateParams(orderItemIdParamSchema),
   validateBody(discountInputSchema),
   orderController.setOrderItemDiscount
+);
+
+// --- Cancellation (whole order) and void (single line item) (9.4) ---
+
+router.post(
+  '/:orderId/cancel',
+  validateParams(orderIdParamSchema),
+  validateBody(cancellationInputSchema),
+  orderController.cancelOrder
+);
+
+router.post(
+  '/:orderId/items/:orderItemId/void',
+  validateParams(orderItemIdParamSchema),
+  validateBody(cancellationInputSchema),
+  orderController.voidOrderItem
 );
 
 export default router;

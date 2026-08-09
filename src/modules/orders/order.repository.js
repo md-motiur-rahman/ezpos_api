@@ -1,12 +1,18 @@
 import { query } from '../../db/pool.js';
+import { buildUpdateSet } from '../../utils/sql.js';
 
 const ORDER_COLUMNS = `id, shop_id, type, table_number, customer_name, status,
                        created_by_actor_type, created_by_actor_id, created_at, updated_at,
                        discount_type, discount_value, discount_reason,
-                       discounted_by_actor_type, discounted_by_actor_id, discounted_at`;
+                       discounted_by_actor_type, discounted_by_actor_id, discounted_at,
+                       cancelled_at, cancelled_by_actor_type, cancelled_by_actor_id,
+                       cancellation_reason, was_prepped`;
 
 const ORDER_ITEM_DISCOUNT_COLUMNS = `discount_type, discount_value, discount_reason,
                        discounted_by_actor_type, discounted_by_actor_id, discounted_at`;
+
+const ORDER_ITEM_VOID_COLUMNS = `voided_at, voided_by_actor_type, voided_by_actor_id,
+                       void_reason, was_prepped`;
 
 export async function createOrder(
   shopId,
@@ -110,6 +116,8 @@ export async function listItemsForOrder(orderId) {
             oi.quantity, oi.unit_price, oi.created_at,
             oi.discount_type, oi.discount_value, oi.discount_reason,
             oi.discounted_by_actor_type, oi.discounted_by_actor_id, oi.discounted_at,
+            oi.voided_at, oi.voided_by_actor_type, oi.voided_by_actor_id,
+            oi.void_reason, oi.was_prepped,
             COALESCE(mi.name, smi.name) AS item_name,
             miv.name AS variant_name
      FROM order_items oi
@@ -146,10 +154,10 @@ export async function setOrderDiscount(
   return rows[0];
 }
 
-/** Scoped to order_id as well as id, so a caller can never discount an item belonging to a different order via a stale/foreign orderItemId. */
+/** Scoped to order_id as well as id, so a caller can never discount/void an item belonging to a different order via a stale/foreign orderItemId. */
 export async function findOrderItemForOrder(orderItemId, orderId) {
   const { rows } = await query(
-    `SELECT id, order_id, quantity, unit_price, ${ORDER_ITEM_DISCOUNT_COLUMNS}
+    `SELECT id, order_id, quantity, unit_price, ${ORDER_ITEM_DISCOUNT_COLUMNS}, ${ORDER_ITEM_VOID_COLUMNS}
      FROM order_items WHERE id = $1 AND order_id = $2`,
     [orderItemId, orderId]
   );
@@ -168,6 +176,60 @@ export async function setOrderItemDiscount(
      WHERE id = $1
      RETURNING id, order_id, quantity, unit_price, ${ORDER_ITEM_DISCOUNT_COLUMNS}`,
     [orderItemId, discountType, discountValue, reason ?? null, actorType, actorId]
+  );
+  return rows[0];
+}
+
+/**
+ * Cancels the whole order (9.4). `orders` has an updated_at column, so this
+ * reuses buildUpdateSet (same utility every other partial UPDATE in this
+ * project goes through) rather than hand-writing the SET clause - unlike
+ * setOrderDiscount/setOrderItemDiscount above, there's no "clear" case to
+ * special-case here (cancellation is one-directional, no un-cancel), so the
+ * generic helper fits cleanly.
+ */
+export async function cancelOrder(orderId, { reason, wasPrepped, actorType, actorId }) {
+  const { clause, values } = buildUpdateSet(
+    {
+      status: 'status',
+      cancelledAt: 'cancelled_at',
+      cancelledByActorType: 'cancelled_by_actor_type',
+      cancelledByActorId: 'cancelled_by_actor_id',
+      cancellationReason: 'cancellation_reason',
+      wasPrepped: 'was_prepped',
+    },
+    {
+      status: 'cancelled',
+      cancelledAt: new Date(),
+      cancelledByActorType: actorType,
+      cancelledByActorId: actorId,
+      cancellationReason: reason ?? null,
+      wasPrepped,
+    }
+  );
+  values.push(orderId);
+  const { rows } = await query(
+    `UPDATE orders SET ${clause} WHERE id = $${values.length} RETURNING ${ORDER_COLUMNS}`,
+    values
+  );
+  return rows[0];
+}
+
+/**
+ * Voids one line item (9.4). order_items has NO updated_at column (immutable
+ * line once created, per its original migration) - buildUpdateSet always
+ * appends `updated_at = now()`, so it isn't reusable here without adding a
+ * column this table deliberately doesn't have. Hand-written UPDATE instead,
+ * same approach setOrderItemDiscount above already uses for this same table.
+ */
+export async function voidOrderItem(orderItemId, { reason, wasPrepped, actorType, actorId }) {
+  const { rows } = await query(
+    `UPDATE order_items
+     SET voided_at = now(), voided_by_actor_type = $2, voided_by_actor_id = $3,
+         void_reason = $4, was_prepped = $5
+     WHERE id = $1
+     RETURNING id, order_id, quantity, unit_price, ${ORDER_ITEM_DISCOUNT_COLUMNS}, ${ORDER_ITEM_VOID_COLUMNS}`,
+    [orderItemId, actorType, actorId, reason ?? null, wasPrepped]
   );
   return rows[0];
 }

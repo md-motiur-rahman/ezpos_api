@@ -28,3 +28,4 @@ coverage/
 # Build output
 dist/
 build/
+CLAUDE.md

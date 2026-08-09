@@ -3,6 +3,7 @@ import { PERMISSIONS } from '../staff/permissions.js';
 import { resolveActorAuthority, assertHasPermission } from '../staff/actorAuthority.js';
 import * as inventoryRepository from './inventory.repository.js';
 import * as supplierRepository from '../suppliers/supplier.repository.js';
+import * as companyRepository from '../company/company.repository.js';
 
 /**
  * Unlike Module 6's menu, reads here are NOT open to every in-scope actor -
@@ -179,4 +180,42 @@ export async function listItemSuppliers(actor, shopId, itemId) {
 
   const suppliers = await inventoryRepository.listSuppliersForItem(itemId);
   return suppliers.map(toItemSupplierResponse);
+}
+
+// --- Cross-shop overview (7.8) ---
+
+function toOverviewResponse(item) {
+  const lowStockThreshold =
+    item.low_stock_threshold === null ? null : Number(item.low_stock_threshold);
+  return {
+    id: item.id,
+    shopId: item.shop_id,
+    shopName: item.shop_name,
+    name: item.name,
+    unit: item.unit,
+    quantityOnHand: Number(item.quantity_on_hand),
+    lowStockThreshold,
+    isLowStock: lowStockThreshold !== null && Number(item.quantity_on_hand) <= lowStockThreshold,
+    createdAt: item.created_at,
+    updatedAt: item.updated_at,
+  };
+}
+
+/**
+ * Owner-only, deliberately - no staff role has authority spanning more than
+ * one shop anywhere in this system (resolveActorAuthority hard-blocks a
+ * staff actor whose shopId doesn't match), so there's no equivalent staff
+ * path to check here the way requireViewInventory does per-shop. Works the
+ * same for a 'single' business_type company too - just returns that one
+ * shop's items, no restriction needed.
+ */
+export async function listItemsForCompany(ownerUserId, { lowStockOnly } = {}) {
+  const company = await companyRepository.findActiveCompanyByOwner(ownerUserId);
+  if (!company) {
+    throw new AppError('No company found for this account', 404);
+  }
+  const items = await inventoryRepository.listActiveItemsForCompany(company.id, {
+    lowStockOnly: lowStockOnly === 'true',
+  });
+  return items.map(toOverviewResponse);
 }

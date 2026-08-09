@@ -163,6 +163,32 @@ export async function findActiveItemsByIdsForShop(shopId, itemIds) {
   return rows;
 }
 
+// --- Cross-shop overview (7.8) ---
+
+/**
+ * Every active item across every active shop in the company, joined for the
+ * shop's name (needed to label rows in the overview response) and scoped by
+ * shops.company_id rather than a single shop_id - the one place in this
+ * module reads deliberately span shops, for the chain-owner "all locations"
+ * view. Same lowStockOnly clause shape as listActiveItemsForShop (7.3).
+ */
+export async function listActiveItemsForCompany(companyId, { lowStockOnly } = {}) {
+  const lowStockClause = lowStockOnly
+    ? 'AND ii.low_stock_threshold IS NOT NULL AND ii.quantity_on_hand <= ii.low_stock_threshold'
+    : '';
+  const { rows } = await query(
+    `SELECT ii.id, ii.shop_id, s.name AS shop_name, ii.name, ii.unit,
+            ii.quantity_on_hand, ii.low_stock_threshold, ii.created_at, ii.updated_at
+     FROM inventory_items ii
+     JOIN shops s ON s.id = ii.shop_id AND s.deleted_at IS NULL
+     WHERE s.company_id = $1 AND ii.deleted_at IS NULL
+       ${lowStockClause}
+     ORDER BY s.name, ii.name`,
+    [companyId]
+  );
+  return rows;
+}
+
 /**
  * Bulk stock adjustment via UPDATE...FROM unnest() - one atomic statement
  * for every affected item, regardless of how many are adjusted at once.

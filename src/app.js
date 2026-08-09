@@ -21,6 +21,7 @@ import swapRequestRoutes from './modules/rota/swapRequest.routes.js';
 import attendanceRoutes from './modules/rota/attendance.routes.js';
 import shopMenuRoutes from './modules/menu/shopMenu.routes.js';
 import inventoryRoutes from './modules/inventory/inventory.routes.js';
+import inventoryOverviewRoutes from './modules/inventory/inventoryOverview.routes.js';
 import supplierRoutes from './modules/suppliers/supplier.routes.js';
 import purchaseOrderRoutes from './modules/purchaseOrders/purchaseOrder.routes.js';
 import wastageLogRoutes from './modules/wastage/wastageLog.routes.js';
@@ -89,6 +90,16 @@ app.get('/health', async (req, res) => {
 // --- Module routes ---
 app.use('/api/auth', authRoutes);
 app.use('/api/me', meRoutes);
+// Independent mount (Module 7.8), registered BEFORE the broader /api/companies
+// mount below, same load-bearing reasoning as the /api/shops block further
+// down: '/api/companies' is a PREFIX of '/api/companies/mine/inventory-overview',
+// so registering the broad mount first would let this request enter
+// companyRoutes first. No route inside companyRoutes currently matches this
+// path, so it would still fall through correctly today - but that's an
+// accident of company.routes.js having no catch-all, not a guarantee, so this
+// stays above the broad mount on the same principle as every /api/shops/:shopId/*
+// route.
+app.use('/api/companies/mine/inventory-overview', inventoryOverviewRoutes);
 app.use('/api/companies', companyRoutes);
 // Independent mount (Module 4.5), registered BEFORE the broader /api/shops
 // mount below - deliberately, and load-bearing. Express tries app.use()

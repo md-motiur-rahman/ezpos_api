@@ -69,3 +69,10 @@ export const listItemSuppliers = asyncHandler(async (req, res) => {
   const suppliers = await inventoryService.listItemSuppliers(req.actor, req.params.shopId, req.params.itemId);
   res.status(200).json(suppliers);
 });
+
+// --- Cross-shop overview (7.8) ---
+
+export const listItemsForCompany = asyncHandler(async (req, res) => {
+  const items = await inventoryService.listItemsForCompany(req.user.id, req.query);
+  res.status(200).json(items);
+});

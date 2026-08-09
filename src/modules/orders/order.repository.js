@@ -1,7 +1,12 @@
 import { query } from '../../db/pool.js';
 
 const ORDER_COLUMNS = `id, shop_id, type, table_number, customer_name, status,
-                       created_by_actor_type, created_by_actor_id, created_at, updated_at`;
+                       created_by_actor_type, created_by_actor_id, created_at, updated_at,
+                       discount_type, discount_value, discount_reason,
+                       discounted_by_actor_type, discounted_by_actor_id, discounted_at`;
+
+const ORDER_ITEM_DISCOUNT_COLUMNS = `discount_type, discount_value, discount_reason,
+                       discounted_by_actor_type, discounted_by_actor_id, discounted_at`;
 
 export async function createOrder(
   shopId,
@@ -103,6 +108,8 @@ export async function listItemsForOrder(orderId) {
   const { rows } = await query(
     `SELECT oi.id, oi.order_id, oi.menu_item_id, oi.shop_menu_item_id, oi.variant_id,
             oi.quantity, oi.unit_price, oi.created_at,
+            oi.discount_type, oi.discount_value, oi.discount_reason,
+            oi.discounted_by_actor_type, oi.discounted_by_actor_id, oi.discounted_at,
             COALESCE(mi.name, smi.name) AS item_name,
             miv.name AS variant_name
      FROM order_items oi
@@ -114,6 +121,55 @@ export async function listItemsForOrder(orderId) {
     [orderId]
   );
   return rows;
+}
+
+/**
+ * Sets or clears the order-level discount (9.3). Passing null discountType
+ * clears every discount column together (including the actor/timestamp
+ * audit fields) - same "explicit null clears" contract used for the input,
+ * carried straight through to storage.
+ */
+export async function setOrderDiscount(
+  orderId,
+  { discountType, discountValue, reason, actorType, actorId }
+) {
+  const { rows } = await query(
+    `UPDATE orders
+     SET discount_type = $2, discount_value = $3, discount_reason = $4,
+         discounted_by_actor_type = $5, discounted_by_actor_id = $6,
+         discounted_at = CASE WHEN $2::text IS NULL THEN NULL ELSE now() END,
+         updated_at = now()
+     WHERE id = $1
+     RETURNING ${ORDER_COLUMNS}`,
+    [orderId, discountType, discountValue, reason ?? null, actorType, actorId]
+  );
+  return rows[0];
+}
+
+/** Scoped to order_id as well as id, so a caller can never discount an item belonging to a different order via a stale/foreign orderItemId. */
+export async function findOrderItemForOrder(orderItemId, orderId) {
+  const { rows } = await query(
+    `SELECT id, order_id, quantity, unit_price, ${ORDER_ITEM_DISCOUNT_COLUMNS}
+     FROM order_items WHERE id = $1 AND order_id = $2`,
+    [orderItemId, orderId]
+  );
+  return rows[0] ?? null;
+}
+
+export async function setOrderItemDiscount(
+  orderItemId,
+  { discountType, discountValue, reason, actorType, actorId }
+) {
+  const { rows } = await query(
+    `UPDATE order_items
+     SET discount_type = $2, discount_value = $3, discount_reason = $4,
+         discounted_by_actor_type = $5, discounted_by_actor_id = $6,
+         discounted_at = CASE WHEN $2::text IS NULL THEN NULL ELSE now() END
+     WHERE id = $1
+     RETURNING id, order_id, quantity, unit_price, ${ORDER_ITEM_DISCOUNT_COLUMNS}`,
+    [orderItemId, discountType, discountValue, reason ?? null, actorType, actorId]
+  );
+  return rows[0];
 }
 
 /** Bulk fetch across every line on the order in one query, avoiding N+1 - grouping by order_item_id is response-shaping, done in the service layer. */

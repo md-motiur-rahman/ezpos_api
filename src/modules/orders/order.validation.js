@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ORDER_TYPES } from './orderConstants.js';
+import { ORDER_TYPES, DISCOUNT_TYPES } from './orderConstants.js';
 
 const orderItemSchema = z
   .object({
@@ -47,3 +47,31 @@ export const orderIdParamSchema = z.object({
 export const addOrderItemsSchema = z.object({
   items: z.array(orderItemSchema).min(1, 'Provide at least one item to add'),
 });
+
+// --- Discounts, order-level and per-line-item (9.3) ---
+
+export const orderItemIdParamSchema = orderIdParamSchema.extend({
+  orderItemId: z.string().uuid('Invalid order item id'),
+});
+
+const setDiscountSchema = z
+  .object({
+    discountType: z.enum(DISCOUNT_TYPES),
+    discountValue: z.number().positive('discountValue must be greater than 0'),
+    reason: z.string().trim().min(1, 'reason cannot be empty').optional(),
+  })
+  .refine((data) => (data.discountType === 'percentage' ? data.discountValue <= 100 : true), {
+    message: 'A percentage discount cannot exceed 100',
+    path: ['discountValue'],
+  });
+
+// Explicit null clears an existing discount - same "explicit null clears,
+// omitted leaves untouched" contract as 7.3/8.1, applied here to a whole
+// discount rather than a single field: both discountType and discountValue
+// must be null together, since one without the other is meaningless.
+const clearDiscountSchema = z.object({
+  discountType: z.null(),
+  discountValue: z.null(),
+});
+
+export const discountInputSchema = z.union([setDiscountSchema, clearDiscountSchema]);

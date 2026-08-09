@@ -25,3 +25,24 @@ export const addItemsToOrder = asyncHandler(async (req, res) => {
   );
   res.status(201).json(order);
 });
+
+export const setOrderDiscount = asyncHandler(async (req, res) => {
+  const order = await orderService.setOrderDiscount(
+    req.actor,
+    req.params.shopId,
+    req.params.orderId,
+    req.body
+  );
+  res.status(200).json(order);
+});
+
+export const setOrderItemDiscount = asyncHandler(async (req, res) => {
+  const order = await orderService.setOrderItemDiscount(
+    req.actor,
+    req.params.shopId,
+    req.params.orderId,
+    req.params.orderItemId,
+    req.body
+  );
+  res.status(200).json(order);
+});

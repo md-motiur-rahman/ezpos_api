@@ -13,3 +13,6 @@ export const ORDER_TYPES = Object.freeze(['dine_in', 'takeaway']);
  * guessing at states they haven't been scoped yet to need.
  */
 export const ORDER_STATUSES = Object.freeze(['open']);
+
+/** 9.3 - percentage is 0-100 of the amount it's applied against; fixed is a currency amount. */
+export const DISCOUNT_TYPES = Object.freeze(['percentage', 'fixed']);

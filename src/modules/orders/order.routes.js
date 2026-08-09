@@ -6,6 +6,8 @@ import {
   createOrderSchema,
   orderIdParamSchema,
   addOrderItemsSchema,
+  orderItemIdParamSchema,
+  discountInputSchema,
 } from './order.validation.js';
 import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
 
@@ -41,6 +43,22 @@ router.post(
   validateParams(orderIdParamSchema),
   validateBody(addOrderItemsSchema),
   orderController.addItemsToOrder
+);
+
+// --- Discounts, order-level and per-line-item (9.3) ---
+
+router.patch(
+  '/:orderId/discount',
+  validateParams(orderIdParamSchema),
+  validateBody(discountInputSchema),
+  orderController.setOrderDiscount
+);
+
+router.patch(
+  '/:orderId/items/:orderItemId/discount',
+  validateParams(orderItemIdParamSchema),
+  validateBody(discountInputSchema),
+  orderController.setOrderItemDiscount
 );
 
 export default router;

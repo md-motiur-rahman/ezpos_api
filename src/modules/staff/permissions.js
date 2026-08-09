@@ -29,6 +29,9 @@ export const PERMISSIONS = Object.freeze({
   VIEW_REPORTS: 'view_reports',
   MANAGE_ROTA: 'manage_rota',
   MANAGE_MENU: 'manage_menu',
+  // 9.3 - separate from ACCESS_TILL on purpose: not every till user should
+  // be able to discount an order, confirmed directly.
+  APPLY_DISCOUNT: 'apply_discount',
 });
 
 /**
@@ -70,14 +73,19 @@ export const ROLE_DEFAULT_PERMISSIONS = Object.freeze({
     PERMISSIONS.GRANT_PERMISSIONS,
     PERMISSIONS.MANAGE_ROTA,
     PERMISSIONS.MANAGE_MENU,
+    PERMISSIONS.APPLY_DISCOUNT,
   ]),
 
   // Manager-level abilities (including manage_rota and manage_menu) are
   // earned only via 4.4's override system, never granted by default just
-  // for holding this role.
+  // for holding this role - APPLY_DISCOUNT (9.3) is a deliberate exception,
+  // confirmed directly: discounting is an on-the-floor discretion call a
+  // Shift Manager needs in the moment, not something worth gating behind a
+  // manual grant every single shop would otherwise have to set up.
   [ROLES.SHIFT_MANAGER]: Object.freeze([
     PERMISSIONS.ACCESS_TILL,
     PERMISSIONS.PERFORM_HEALTH_SAFETY,
+    PERMISSIONS.APPLY_DISCOUNT,
   ]),
 
   [ROLES.SERVER]: Object.freeze([PERMISSIONS.ACCESS_TILL, PERMISSIONS.PERFORM_HEALTH_SAFETY]),

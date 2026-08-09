@@ -17,6 +17,21 @@ async function requireAccessTill(actor, shopId) {
   return authority;
 }
 
+/**
+ * Separate gate from ACCESS_TILL (9.3, confirmed directly) - Manager/Shift
+ * Manager get it by default, Server/Chef don't but can be granted it via
+ * 4.4's override system like any other permission, with zero extra code.
+ */
+async function requireApplyDiscount(actor, shopId) {
+  const authority = await resolveActorAuthority(actor, shopId);
+  assertHasPermission(
+    authority,
+    PERMISSIONS.APPLY_DISCOUNT,
+    'You do not have permission to apply discounts'
+  );
+  return authority;
+}
+
 function toListResponse(order) {
   return {
     id: order.id,
@@ -42,9 +57,44 @@ function toModifierResponse(row) {
   };
 }
 
+/**
+ * Shared by order rows and order_item rows (9.3) - both carry the identical
+ * six discount_* columns. Returns null when no discount is set, so the
+ * response contract for an undiscounted order/item is unchanged from
+ * before 9.3 ever existed.
+ */
+function toDiscountResponse(row) {
+  if (!row.discount_type) {
+    return null;
+  }
+  return {
+    type: row.discount_type,
+    value: Number(row.discount_value),
+    reason: row.discount_reason,
+    appliedByActorType: row.discounted_by_actor_type,
+    appliedByActorId: row.discounted_by_actor_id,
+    appliedAt: row.discounted_at,
+  };
+}
+
+/** percentage is 0-100 OF baseAmount; fixed is a currency amount already validated <= baseAmount at apply time. */
+function computeDiscountAmount(baseAmount, discount) {
+  if (!discount) {
+    return 0;
+  }
+  const amount = discount.type === 'percentage' ? (baseAmount * discount.value) / 100 : discount.value;
+  return Number(amount.toFixed(2));
+}
+
 function toItemResponse(row, modifiers) {
   const unitPrice = Number(row.unit_price);
   const modifierTotal = modifiers.reduce((sum, m) => sum + m.priceDelta, 0);
+  // Computed, not stored - "derive, don't store", same philosophy as
+  // isLowStock/discrepancy/totalCost elsewhere in this project. Unchanged
+  // by 9.3: still the PRE-discount line amount, exactly as before.
+  const lineTotal = Number(((unitPrice + modifierTotal) * row.quantity).toFixed(2));
+  const discount = toDiscountResponse(row);
+  const discountAmount = computeDiscountAmount(lineTotal, discount);
   return {
     id: row.id,
     menuItemId: row.menu_item_id,
@@ -55,15 +105,29 @@ function toItemResponse(row, modifiers) {
     quantity: row.quantity,
     unitPrice,
     modifiers,
-    // Computed, not stored - "derive, don't store", same philosophy as
-    // isLowStock/discrepancy/totalCost elsewhere in this project.
-    lineTotal: Number(((unitPrice + modifierTotal) * row.quantity).toFixed(2)),
+    lineTotal,
+    // New in 9.3 - null/0 for any item with no discount applied, so an
+    // undiscounted response is unaffected in every field that existed
+    // before this submodule.
+    discount,
+    total: Number((lineTotal - discountAmount).toFixed(2)),
     createdAt: row.created_at,
   };
 }
 
 function toDetailResponse(order, items) {
+  // Unchanged by 9.3: still the sum of pre-discount lineTotals.
   const subtotal = items.reduce((sum, item) => sum + item.lineTotal, 0);
+  const itemDiscountTotal = items.reduce((sum, item) => sum + (item.lineTotal - item.total), 0);
+  const subtotalAfterItemDiscounts = subtotal - itemDiscountTotal;
+  const discount = toDiscountResponse(order);
+  const discountAmount = computeDiscountAmount(subtotalAfterItemDiscounts, discount);
+  // Floored at 0 as a display-time safety net only - the real defense is
+  // apply-time validation (see validateDiscountAgainstBase below); this
+  // just guards the edge case where a valid-at-the-time line discount and a
+  // valid-at-the-time order discount are applied at different moments and
+  // would otherwise compound into a negative number.
+  const total = Math.max(0, subtotalAfterItemDiscounts - discountAmount);
   return {
     id: order.id,
     shopId: order.shop_id,
@@ -74,9 +138,14 @@ function toDetailResponse(order, items) {
     createdByActorType: order.created_by_actor_type,
     createdByActorId: order.created_by_actor_id,
     items,
-    // Pre-tax, pre-discount - deliberately. VAT (9.8) and discounts (9.3)
-    // are separate, not-yet-built submodules; this is not a final total.
+    // Pre-tax, pre-discount - deliberately unchanged. VAT (9.8) is still a
+    // separate, not-yet-built submodule; this is not a final total.
     subtotal: Number(subtotal.toFixed(2)),
+    // New in 9.3 - all zero/null for an order with no discounts anywhere.
+    itemDiscountTotal: Number(itemDiscountTotal.toFixed(2)),
+    discount,
+    discountAmount,
+    total: Number(total.toFixed(2)),
     createdAt: order.created_at,
     updatedAt: order.updated_at,
   };
@@ -276,6 +345,93 @@ export async function addItemsToOrder(actor, shopId, orderId, data) {
   const resolvedLines = data.items.map((line) => resolveOrderLine(resolvedMenu, line));
 
   await writeResolvedItems(order.id, resolvedLines);
+
+  return fetchOrderDetail(shopId, order.id);
+}
+
+/** A fixed discount can't exceed the amount it's being applied against - a percentage is already capped at 100 by the validation schema, so can never do this on its own. */
+function validateDiscountAgainstBase(data, baseAmount) {
+  if (data.discountType === 'fixed' && data.discountValue > baseAmount) {
+    throw new AppError(
+      `Discount amount cannot exceed the current amount (${baseAmount.toFixed(2)})`,
+      400
+    );
+  }
+}
+
+const CLEARED_DISCOUNT = { discountType: null, discountValue: null, reason: null, actorType: null, actorId: null };
+
+/**
+ * Sets or clears the order-level discount (9.3), applied to the subtotal
+ * AFTER any per-line discounts below. Same open-order guard as 9.2's
+ * addItemsToOrder - can't discount an order that's no longer open.
+ */
+export async function setOrderDiscount(actor, shopId, orderId, data) {
+  await requireApplyDiscount(actor, shopId);
+  const order = await getOrderOrThrow(shopId, orderId);
+
+  if (order.status !== 'open') {
+    throw new AppError(`Cannot modify discounts on an order with status '${order.status}'`, 400);
+  }
+
+  if (data.discountType === null) {
+    await orderRepository.setOrderDiscount(order.id, CLEARED_DISCOUNT);
+    return fetchOrderDetail(shopId, order.id);
+  }
+
+  // Validated against the CURRENT subtotal-after-item-discounts at the
+  // moment of applying - a point-in-time check, not a permanent guarantee,
+  // since 9.2 allows items to be added later (see toDetailResponse's
+  // Math.max(0, ...) for the corresponding read-time safety net).
+  const currentDetail = await fetchOrderDetail(shopId, order.id);
+  const baseAmount = currentDetail.subtotal - currentDetail.itemDiscountTotal;
+  validateDiscountAgainstBase(data, baseAmount);
+
+  await orderRepository.setOrderDiscount(order.id, {
+    discountType: data.discountType,
+    discountValue: data.discountValue,
+    reason: data.reason ?? null,
+    actorType: actor.type,
+    actorId: actor.id,
+  });
+
+  return fetchOrderDetail(shopId, order.id);
+}
+
+/**
+ * Sets or clears one line's own discount (9.3), independent of any
+ * order-level discount applied on top of it.
+ */
+export async function setOrderItemDiscount(actor, shopId, orderId, orderItemId, data) {
+  await requireApplyDiscount(actor, shopId);
+  const order = await getOrderOrThrow(shopId, orderId);
+
+  if (order.status !== 'open') {
+    throw new AppError(`Cannot modify discounts on an order with status '${order.status}'`, 400);
+  }
+
+  const item = await orderRepository.findOrderItemForOrder(orderItemId, order.id);
+  if (!item) {
+    throw new AppError('Order item not found', 404);
+  }
+
+  if (data.discountType === null) {
+    await orderRepository.setOrderItemDiscount(item.id, CLEARED_DISCOUNT);
+    return fetchOrderDetail(shopId, order.id);
+  }
+
+  const modifierRows = await orderRepository.listModifiersForOrderItems([item.id]);
+  const modifierTotal = modifierRows.reduce((sum, m) => sum + Number(m.price_delta), 0);
+  const lineTotal = Number(((Number(item.unit_price) + modifierTotal) * item.quantity).toFixed(2));
+  validateDiscountAgainstBase(data, lineTotal);
+
+  await orderRepository.setOrderItemDiscount(item.id, {
+    discountType: data.discountType,
+    discountValue: data.discountValue,
+    reason: data.reason ?? null,
+    actorType: actor.type,
+    actorId: actor.id,
+  });
 
   return fetchOrderDetail(shopId, order.id);
 }

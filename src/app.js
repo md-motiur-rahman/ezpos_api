@@ -23,6 +23,7 @@ import shopMenuRoutes from './modules/menu/shopMenu.routes.js';
 import inventoryRoutes from './modules/inventory/inventory.routes.js';
 import supplierRoutes from './modules/suppliers/supplier.routes.js';
 import purchaseOrderRoutes from './modules/purchaseOrders/purchaseOrder.routes.js';
+import wastageLogRoutes from './modules/wastage/wastageLog.routes.js';
 
 const app = express();
 
@@ -55,9 +56,11 @@ const rateLimiter = rateLimit({
 app.use(helmet());
 app.use(cors(corsOptions));
 app.use(rateLimiter);
-app.use(pinoHttp({ logger }));
+app.use(pinoHttp({ logger })); // structured request logging (method, path, status, duration)
 
 // --- Stripe webhooks ---
+// Mounted BEFORE express.json() deliberately: signature verification needs the
+// raw request body, which express.json() would otherwise have already parsed.
 app.use('/api/webhooks', webhookRoutes);
 
 app.use(express.json());
@@ -87,6 +90,18 @@ app.get('/health', async (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/me', meRoutes);
 app.use('/api/companies', companyRoutes);
+// Independent mount (Module 4.5), registered BEFORE the broader /api/shops
+// mount below - deliberately, and load-bearing. Express tries app.use()
+// prefixes in registration order; /api/shops is a PREFIX of
+// /api/shops/:shopId/staff (and every other /api/shops/:shopId/* route
+// below it), so if the broad mount were registered first it would swallow
+// every one of these more specific requests into shopRoutes' owner-only
+// requireAuth before the correct router ever got a chance to run.
+// EVERY /api/shops/:shopId/* mount below MUST stay above the plain
+// '/api/shops' line for this exact reason - confirmed the hard way (7.7):
+// wastage-logs was mounted AFTER '/api/shops' by mistake, and every staff
+// token hitting it got silently swallowed into requireAuth, producing a
+// uniform 401 regardless of the actor's actual role or permissions.
 app.use('/api/shops/:shopId/staff', staffRoutes);
 app.use('/api/shops/:shopId/rota-shifts', rotaRoutes);
 app.use('/api/shops/:shopId/swap-requests', swapRequestRoutes);
@@ -95,6 +110,7 @@ app.use('/api/shops/:shopId/menu', shopMenuRoutes);
 app.use('/api/shops/:shopId/inventory-items', inventoryRoutes);
 app.use('/api/shops/:shopId/suppliers', supplierRoutes);
 app.use('/api/shops/:shopId/purchase-orders', purchaseOrderRoutes);
+app.use('/api/shops/:shopId/wastage-logs', wastageLogRoutes);
 app.use('/api/shops', shopRoutes);
 app.use('/api/staff-auth', staffAuthRoutes);
 app.use('/api/staff-permissions', staffPermissionRoutes);

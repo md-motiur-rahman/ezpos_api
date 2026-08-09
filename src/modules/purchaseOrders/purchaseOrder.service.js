@@ -1,5 +1,6 @@
 import { AppError } from '../../utils/AppError.js';
 import { requireViewInventory, requireManageInventory } from '../inventory/inventory.service.js';
+import * as inventoryRepository from '../inventory/inventory.repository.js';
 import * as supplierRepository from '../suppliers/supplier.repository.js';
 import * as purchaseOrderRepository from './purchaseOrder.repository.js';
 
@@ -218,7 +219,7 @@ export async function createReceipt(actor, shopId, poId, { receivedAt, notes, it
   const poItemById = new Map(poItems.map((pi) => [pi.id, pi]));
   const inventoryItemIds = items.map((i) => poItemById.get(i.purchaseOrderItemId).inventory_item_id);
   const amounts = items.map((i) => i.quantityReceived);
-  await purchaseOrderRepository.incrementInventoryQuantities(inventoryItemIds, amounts);
+  await inventoryRepository.adjustInventoryQuantities(inventoryItemIds, amounts);
 
   return fetchPurchaseOrderDetail(shopId, po.id);
 }

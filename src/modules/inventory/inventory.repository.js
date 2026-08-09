@@ -144,3 +144,44 @@ export async function listSuppliersForItem(itemId) {
   );
   return rows;
 }
+
+// --- Bulk operations shared across modules (7.6/7.7) ---
+
+/**
+ * Bulk fetch, scoped to the shop - serves two purposes: validating that
+ * every referenced id actually belongs to this shop (compare the returned
+ * row count to itemIds.length), and giving the CURRENT quantityOnHand for
+ * each, needed before a stock-decreasing operation like wastage can check
+ * "is there enough to waste this much" before writing anything.
+ */
+export async function findActiveItemsByIdsForShop(shopId, itemIds) {
+  const { rows } = await query(
+    `SELECT ${COLUMNS} FROM inventory_items
+     WHERE id = ANY($1::uuid[]) AND shop_id = $2 AND deleted_at IS NULL`,
+    [itemIds, shopId]
+  );
+  return rows;
+}
+
+/**
+ * Bulk stock adjustment via UPDATE...FROM unnest() - one atomic statement
+ * for every affected item, regardless of how many are adjusted at once.
+ * Relocated here from purchaseOrder.repository.js (7.7) - originally built
+ * for receiving (7.6, always positive amounts), now shared with wastage
+ * (always negative amounts) - genuinely the same mechanism either way,
+ * `quantity_on_hand + amount` handles both directions. Renamed from
+ * "increment" to "adjust" since that name would be misleading once used for
+ * decrements too. Verified empirically (7.6) that repeated calls against
+ * the same item correctly accumulate rather than overwrite.
+ */
+export async function adjustInventoryQuantities(inventoryItemIds, amounts) {
+  await query(
+    `UPDATE inventory_items
+     SET quantity_on_hand = quantity_on_hand + delta.amount, updated_at = now()
+     FROM (SELECT unnest($1::uuid[]) AS item_id, unnest($2::numeric[]) AS amount) AS delta
+     WHERE inventory_items.id = delta.item_id`,
+    [inventoryItemIds, amounts]
+  );
+
+  
+}

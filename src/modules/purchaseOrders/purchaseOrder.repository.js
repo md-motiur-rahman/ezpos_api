@@ -147,23 +147,10 @@ export async function findPoItemsForPurchaseOrder(purchaseOrderId, poItemIds) {
   return rows;
 }
 
-/**
- * Bulk stock increment via UPDATE...FROM unnest() - one atomic statement
- * for every affected inventory item, even when several line items are
- * received at once. Verified empirically, including that two separate
- * receipts against the same item correctly ACCUMULATE rather than
- * overwrite (0+5, then +3, correctly yields 8) - this is the actual
- * mechanism a "logging only" module never had: this one changes real stock.
- */
-export async function incrementInventoryQuantities(inventoryItemIds, amounts) {
-  await query(
-    `UPDATE inventory_items
-     SET quantity_on_hand = quantity_on_hand + delta.amount, updated_at = now()
-     FROM (SELECT unnest($1::uuid[]) AS item_id, unnest($2::numeric[]) AS amount) AS delta
-     WHERE inventory_items.id = delta.item_id`,
-    [inventoryItemIds, amounts]
-  );
-}
+// Bulk stock adjustment now lives in inventory.repository.js as
+// adjustInventoryQuantities - relocated there (7.7) since it's a general
+// inventory operation (receiving increments, wastage decrements), not
+// something that belongs to the purchase-orders module specifically.
 
 export async function listReceiptsForPurchaseOrder(purchaseOrderId) {
   const { rows } = await query(

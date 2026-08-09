@@ -55,6 +55,11 @@ function toResponse(item) {
     // quantityOnHand, no separate sync step needed. An item with no
     // threshold configured is never low stock, regardless of quantity.
     isLowStock: lowStockThreshold !== null && Number(item.quantity_on_hand) <= lowStockThreshold,
+    // pg returns `integer` columns as JS numbers already (unlike `numeric`,
+    // which comes back as a string) - no Number() conversion needed, unlike
+    // lowStockThreshold above.
+    shelfLifeDays: item.shelf_life_days,
+    shelfLifeOpenedDays: item.shelf_life_opened_days,
     createdAt: item.created_at,
     updatedAt: item.updated_at,
   };
@@ -299,6 +304,8 @@ function toOverviewResponse(item) {
     quantityOnHand: Number(item.quantity_on_hand),
     lowStockThreshold,
     isLowStock: lowStockThreshold !== null && Number(item.quantity_on_hand) <= lowStockThreshold,
+    shelfLifeDays: item.shelf_life_days,
+    shelfLifeOpenedDays: item.shelf_life_opened_days,
     createdAt: item.created_at,
     updatedAt: item.updated_at,
   };

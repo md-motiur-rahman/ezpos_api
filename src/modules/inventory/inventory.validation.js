@@ -1,10 +1,21 @@
 import { z } from 'zod';
 
+// Shared by create (optional) and update (nullable + optional) below -
+// whole days, strictly positive: 0 isn't a meaningful shelf life, and
+// "not tracked" is already expressed by leaving the field out/null rather
+// than by a zero value.
+const shelfLifeDaysSchema = z
+  .number()
+  .int('shelf life must be a whole number of days')
+  .positive('shelf life must be greater than 0 days');
+
 export const createInventoryItemSchema = z.object({
   name: z.string().trim().min(1, 'Item name is required'),
   unit: z.string().trim().min(1, 'Unit is required'),
   quantityOnHand: z.number().min(0, 'quantityOnHand cannot be negative').optional(),
   lowStockThreshold: z.number().min(0, 'lowStockThreshold cannot be negative').optional(),
+  shelfLifeDays: shelfLifeDaysSchema.optional(),
+  shelfLifeOpenedDays: shelfLifeDaysSchema.optional(),
 });
 
 export const updateInventoryItemSchema = z.object({
@@ -17,6 +28,9 @@ export const updateInventoryItemSchema = z.object({
   // "explicit null clears, omitted leaves alone" contract buildUpdateSet
   // already relies on everywhere else in this project.
   lowStockThreshold: z.number().min(0, 'lowStockThreshold cannot be negative').nullable().optional(),
+  // Same nullable-and-optional contract as lowStockThreshold above (8.1).
+  shelfLifeDays: shelfLifeDaysSchema.nullable().optional(),
+  shelfLifeOpenedDays: shelfLifeDaysSchema.nullable().optional(),
 });
 
 export const inventoryItemIdParamSchema = z.object({

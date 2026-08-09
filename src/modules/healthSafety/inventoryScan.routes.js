@@ -27,6 +27,27 @@ router.post(
   inventoryScanController.createScan
 );
 router.get('/', validateParams(shopIdOnlyParamSchema), inventoryScanController.listScans);
+// Registered BEFORE '/:scanId' below - deliberately, and load-bearing the
+// same way app.js's mount ordering is: '/:scanId' would otherwise capture
+// the literal path segment 'latest' as if it were a scan id, and fail the
+// UUID check in scanIdParamSchema with a 400 instead of ever reaching this
+// route. Same "specific route before the broader/parameterized one"
+// principle as every /api/shops/:shopId/* mount in app.js, just scoped to
+// this one router instead of the whole app.
+router.get('/latest', validateParams(shopIdOnlyParamSchema), inventoryScanController.listLatestScans);
 router.get('/:scanId', validateParams(scanIdParamSchema), inventoryScanController.getScan);
+
+// --- Print log (8.3) ---
+
+router.post(
+  '/:scanId/print',
+  validateParams(scanIdParamSchema),
+  inventoryScanController.triggerPrint
+);
+router.get(
+  '/:scanId/prints',
+  validateParams(scanIdParamSchema),
+  inventoryScanController.listPrints
+);
 
 export default router;

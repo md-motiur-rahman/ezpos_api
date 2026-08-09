@@ -59,3 +59,57 @@ export async function findScanByIdForShop(id, shopId) {
   );
   return rows[0] ?? null;
 }
+
+/**
+ * One row per inventory item that has been scanned at least once - only
+ * the MOST RECENT scan for each, via DISTINCT ON (verified empirically
+ * that this picks the truly latest by scanned_at, not insertion order,
+ * before this query was relied on). Postgres requires ORDER BY's leading
+ * expression(s) to match DISTINCT ON's - inventory_item_id first, then
+ * scanned_at DESC picks the winner within each group. Items never scanned
+ * don't appear - this is scan-HISTORY status (8.3), not a shelf-life-
+ * configuration listing (that's 8.1's job).
+ */
+export async function listLatestScansForShop(shopId) {
+  const { rows } = await query(
+    `SELECT DISTINCT ON (s.inventory_item_id)
+            ${SCAN_COLUMNS}, ii.name AS item_name, ii.unit AS item_unit
+     FROM inventory_item_scans s
+     ${ITEM_JOIN}
+     WHERE s.shop_id = $1
+     ORDER BY s.inventory_item_id, s.scanned_at DESC`,
+    [shopId]
+  );
+  return rows;
+}
+
+// --- Print log (8.3) ---
+
+const PRINT_COLUMNS = `id, scan_id, shop_id, printed_at, created_at, updated_at`;
+
+/**
+ * Immutable once created, same as the scan itself - no update/delete
+ * function exists here at all. Each call is a NEW row, deliberately - a
+ * damaged label just gets reprinted, and the history of every print stays
+ * visible rather than being overwritten (same "multiple receipts per PO"
+ * precedent as 7.6).
+ */
+export async function createPrint(shopId, scanId) {
+  const { rows } = await query(
+    `INSERT INTO inventory_item_scan_prints (shop_id, scan_id)
+     VALUES ($1, $2)
+     RETURNING ${PRINT_COLUMNS}`,
+    [shopId, scanId]
+  );
+  return rows[0];
+}
+
+export async function listPrintsForScan(scanId, shopId) {
+  const { rows } = await query(
+    `SELECT ${PRINT_COLUMNS} FROM inventory_item_scan_prints
+     WHERE scan_id = $1 AND shop_id = $2
+     ORDER BY printed_at DESC`,
+    [scanId, shopId]
+  );
+  return rows;
+}

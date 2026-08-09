@@ -119,3 +119,64 @@ export async function getScan(actor, shopId, scanId) {
   }
   return toResponse(scan);
 }
+
+/**
+ * One row per item that has been scanned at least once, showing only its
+ * most recent scan (8.3) - same permission gate and response shape as
+ * every other read here, just a different repository query underneath.
+ */
+export async function listLatestScans(actor, shopId) {
+  await requirePerformHealthSafety(actor, shopId);
+  const scans = await scanRepository.listLatestScansForShop(shopId);
+  return scans.map(toResponse);
+}
+
+// --- Print log (8.3) ---
+
+async function getScanOrThrow(shopId, scanId) {
+  const scan = await scanRepository.findScanByIdForShop(scanId, shopId);
+  if (!scan) {
+    throw new AppError('Scan not found', 404);
+  }
+  return scan;
+}
+
+function toPrintResponse(printRow, scan) {
+  return {
+    id: printRow.id,
+    scanId: printRow.scan_id,
+    printedAt: printRow.printed_at,
+    // A deliberately NARROW subset of the scan - exactly what belongs on a
+    // physical label, not the full scan record (no id/state/scannedAt
+    // clutter). Reuses toResponse's already-correct date formatting rather
+    // than re-deriving it.
+    label: {
+      itemName: scan.itemName,
+      sku: scan.sku,
+      expiresOn: scan.expiresOn,
+    },
+  };
+}
+
+/**
+ * Same PERFORM_HEALTH_SAFETY gate as everything else in this module - not a
+ * new decision, just consistent with 8.2. Each call creates a NEW print
+ * row (see inventoryScan.repository.js) - reprinting is not an error, it's
+ * the expected way to replace a damaged label.
+ */
+export async function triggerPrint(actor, shopId, scanId) {
+  await requirePerformHealthSafety(actor, shopId);
+  const scan = await getScanOrThrow(shopId, scanId);
+
+  const printRow = await scanRepository.createPrint(shopId, scanId);
+  return toPrintResponse(printRow, toResponse(scan));
+}
+
+export async function listPrints(actor, shopId, scanId) {
+  await requirePerformHealthSafety(actor, shopId);
+  const scan = await getScanOrThrow(shopId, scanId);
+  const response = toResponse(scan);
+
+  const prints = await scanRepository.listPrintsForScan(scanId, shopId);
+  return prints.map((printRow) => toPrintResponse(printRow, response));
+}

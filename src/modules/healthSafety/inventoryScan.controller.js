@@ -15,3 +15,22 @@ export const getScan = asyncHandler(async (req, res) => {
   const scan = await inventoryScanService.getScan(req.actor, req.params.shopId, req.params.scanId);
   res.status(200).json(scan);
 });
+
+export const listLatestScans = asyncHandler(async (req, res) => {
+  const scans = await inventoryScanService.listLatestScans(req.actor, req.params.shopId);
+  res.status(200).json(scans);
+});
+
+export const triggerPrint = asyncHandler(async (req, res) => {
+  const print = await inventoryScanService.triggerPrint(
+    req.actor,
+    req.params.shopId,
+    req.params.scanId
+  );
+  res.status(201).json(print);
+});
+
+export const listPrints = asyncHandler(async (req, res) => {
+  const prints = await inventoryScanService.listPrints(req.actor, req.params.shopId, req.params.scanId);
+  res.status(200).json(prints);
+});

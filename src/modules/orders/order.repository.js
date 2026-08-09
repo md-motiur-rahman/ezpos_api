@@ -234,6 +234,56 @@ export async function voidOrderItem(orderItemId, { reason, wasPrepped, actorType
   return rows[0];
 }
 
+const PAYMENT_COLUMNS = `id, order_id, method, amount, amount_tendered, provider_reference,
+                       paid_by_actor_type, paid_by_actor_id, created_at`;
+
+/** Immutable insert (9.5) - no update path, same as receipts/wastage/scans. */
+export async function createOrderPayment(
+  orderId,
+  { method, amount, amountTendered, providerReference, actorType, actorId }
+) {
+  const { rows } = await query(
+    `INSERT INTO order_payments
+       (order_id, method, amount, amount_tendered, provider_reference,
+        paid_by_actor_type, paid_by_actor_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING ${PAYMENT_COLUMNS}`,
+    [
+      orderId,
+      method,
+      amount,
+      amountTendered ?? null,
+      providerReference ?? null,
+      actorType,
+      actorId,
+    ]
+  );
+  return rows[0];
+}
+
+export async function listPaymentsForOrder(orderId) {
+  const { rows } = await query(
+    `SELECT ${PAYMENT_COLUMNS} FROM order_payments WHERE order_id = $1 ORDER BY created_at`,
+    [orderId]
+  );
+  return rows;
+}
+
+/**
+ * Advances an order's status after a payment lands (9.5) - 'partially_paid'
+ * or 'paid'. Deliberately a narrow status-only update rather than a generic
+ * setter: 9.4's cancelOrder writes its own audit columns alongside its
+ * status change, and keeping these separate means neither can accidentally
+ * clobber the other's fields.
+ */
+export async function setOrderStatus(orderId, status) {
+  const { rows } = await query(
+    `UPDATE orders SET status = $2, updated_at = now() WHERE id = $1 RETURNING ${ORDER_COLUMNS}`,
+    [orderId, status]
+  );
+  return rows[0];
+}
+
 /** Bulk fetch across every line on the order in one query, avoiding N+1 - grouping by order_item_id is response-shaping, done in the service layer. */
 export async function listModifiersForOrderItems(orderItemIds) {
   if (orderItemIds.length === 0) {

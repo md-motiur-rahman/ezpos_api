@@ -67,3 +67,13 @@ export const voidOrderItem = asyncHandler(async (req, res) => {
   );
   res.status(200).json(order);
 });
+
+export const recordPayment = asyncHandler(async (req, res) => {
+  const order = await orderService.recordPayment(
+    req.actor,
+    req.params.shopId,
+    req.params.orderId,
+    req.body
+  );
+  res.status(201).json(order);
+});

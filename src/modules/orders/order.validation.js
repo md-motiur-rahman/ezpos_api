@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ORDER_TYPES, DISCOUNT_TYPES } from './orderConstants.js';
+import { ORDER_TYPES, DISCOUNT_TYPES, PAYMENT_METHODS } from './orderConstants.js';
 
 const orderItemSchema = z
   .object({
@@ -87,3 +87,31 @@ export const cancellationInputSchema = z.object({
   wasPrepped: z.boolean(),
   reason: z.string().trim().min(1, 'reason cannot be empty').optional(),
 });
+
+// --- Payments, cash and card, split/partial (9.5) ---
+
+// Cash and card take genuinely different inputs, so this is a discriminated
+// union rather than one object with two optional fields: it makes the
+// REQUIRED field method-specific (cash without amountTendered, or card
+// without amount, is rejected), which a single object with two optionals
+// could not express. Unknown extra keys are stripped, not rejected - same
+// non-strict behaviour as every other schema in this project.
+//
+// Cash uses amountTendered (what the customer physically handed over, which
+// MAY exceed what's owed - confirmed directly); card uses amount (what to
+// charge, which may NOT exceed what's owed, since there's nothing to give
+// change from).
+const cashPaymentSchema = z.object({
+  method: z.literal('cash'),
+  amountTendered: z.number().positive('amountTendered must be greater than 0'),
+});
+
+const cardPaymentSchema = z.object({
+  method: z.literal('card'),
+  amount: z.number().positive('amount must be greater than 0'),
+});
+
+export const paymentInputSchema = z.discriminatedUnion('method', [
+  cashPaymentSchema,
+  cardPaymentSchema,
+]);

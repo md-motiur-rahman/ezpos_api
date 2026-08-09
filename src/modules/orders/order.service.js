@@ -4,6 +4,25 @@ import { PERMISSIONS } from '../staff/permissions.js';
 import { resolveActorAuthority, assertHasPermission } from '../staff/actorAuthority.js';
 import * as shopMenuService from '../menu/shopMenu.service.js';
 import * as orderRepository from './order.repository.js';
+import * as paymentProvider from './paymentProvider.js';
+import { PAYABLE_ORDER_STATUSES } from './orderConstants.js';
+
+/**
+ * Every monetary value out of `pg` arrives as a STRING, not a number
+ * (numeric columns always do) - verified empirically before this submodule
+ * was built, because the failure mode is silent and expensive: "10.00" +
+ * "5.55" evaluates to the string "10.005.55" rather than 15.55, with no
+ * error anywhere. Every amount is funnelled through here before any
+ * arithmetic touches it.
+ */
+function toMoney(value) {
+  return Number(value ?? 0);
+}
+
+/** Money is always settled to 2dp - kills IEEE-754 noise (0.1 + 0.2 = 0.30000000000000004) before it reaches a response or the DB. */
+function roundMoney(value) {
+  return Number(value.toFixed(2));
+}
 
 /**
  * Confirmed directly: order creation/reading is a till operation, gated on
@@ -145,7 +164,28 @@ function toItemResponse(row, modifiers) {
   };
 }
 
-function toDetailResponse(order, items) {
+/**
+ * One payment row (9.5). `change` is DERIVED here, never stored - what the
+ * customer handed over minus what was actually credited to the order. Card
+ * payments have no tendered/change concept at all, so both are null.
+ */
+function toPaymentResponse(row) {
+  const amount = toMoney(row.amount);
+  const amountTendered = row.amount_tendered === null ? null : toMoney(row.amount_tendered);
+  return {
+    id: row.id,
+    method: row.method,
+    amount,
+    amountTendered,
+    change: amountTendered === null ? null : roundMoney(amountTendered - amount),
+    providerReference: row.provider_reference,
+    paidByActorType: row.paid_by_actor_type,
+    paidByActorId: row.paid_by_actor_id,
+    createdAt: row.created_at,
+  };
+}
+
+function toDetailResponse(order, items, payments = []) {
   // Voided items (9.4) are kept in the response for audit but excluded from
   // every total below - they're no longer being charged. 9.1/9.2/9.3 never
   // produced a voided item, so this filter is a no-op for their tests and
@@ -164,6 +204,12 @@ function toDetailResponse(order, items) {
   // valid-at-the-time order discount are applied at different moments and
   // would otherwise compound into a negative number.
   const total = Math.max(0, subtotalAfterItemDiscounts - discountAmount);
+  // 9.5 - summed from the payment rows themselves rather than a SQL
+  // SUM(), so there's exactly one definition of "amount paid" and no risk
+  // of the aggregate and the itemized list disagreeing. (A SQL SUM() over
+  // zero rows also returns NULL rather than 0 - verified empirically - so
+  // this avoids that trap entirely.)
+  const amountPaid = payments.reduce((sum, payment) => sum + payment.amount, 0);
   return {
     id: order.id,
     shopId: order.shop_id,
@@ -189,6 +235,11 @@ function toDetailResponse(order, items) {
     total: Number(total.toFixed(2)),
     // New in 9.4 - null unless this order has been cancelled.
     cancellation: toCancellationResponse(order),
+    // New in 9.5 - empty/0/full-total for an order with no payments, so
+    // every field 9.1-9.4 already returned is unaffected.
+    payments,
+    amountPaid: roundMoney(amountPaid),
+    balanceDue: roundMoney(Math.max(0, total - amountPaid)),
     createdAt: order.created_at,
     updatedAt: order.updated_at,
   };
@@ -215,6 +266,7 @@ async function fetchOrderDetail(shopId, orderId) {
   const modifierRows = await orderRepository.listModifiersForOrderItems(
     itemRows.map((row) => row.id)
   );
+  const paymentRows = await orderRepository.listPaymentsForOrder(order.id);
 
   const modifiersByOrderItemId = new Map();
   for (const row of modifierRows) {
@@ -224,7 +276,7 @@ async function fetchOrderDetail(shopId, orderId) {
   }
 
   const items = itemRows.map((row) => toItemResponse(row, modifiersByOrderItemId.get(row.id) ?? []));
-  return toDetailResponse(order, items);
+  return toDetailResponse(order, items, paymentRows.map(toPaymentResponse));
 }
 
 /** Locates a resolved menu entry (master or local) for the requested item reference. */
@@ -548,6 +600,96 @@ export async function voidOrderItem(actor, shopId, orderId, orderItemId, data) {
     actorType: actor.type,
     actorId: actor.id,
   });
+
+  return fetchOrderDetail(shopId, order.id);
+}
+
+/**
+ * Records one payment against an order (9.5). Split/partial payment is
+ * simply calling this more than once - same "multiple receipts per PO"
+ * precedent as 7.6, rather than one row that gets topped up.
+ *
+ * The FIRST payment moves the order out of 'open' (to 'partially_paid' or
+ * straight to 'paid'), which - confirmed directly - LOCKS it: 9.2's
+ * addItemsToOrder, 9.3's discount setters and 9.4's cancel/void all guard
+ * on `status === 'open'` and simply stop matching. Not one line in those
+ * three submodules had to change for that to take effect.
+ *
+ * KNOWN LIMITATION, deliberately accepted: the balance is read immediately
+ * before the insert, not inside a transaction - this project has no
+ * transaction wrapper anywhere (see CLAUDE.md section 2), and 9.5 does not
+ * introduce one. Two genuinely simultaneous payments against the same order
+ * could therefore both pass the balance check. Flagged rather than hidden;
+ * the single-till reality this is built for makes it a narrow window.
+ *
+ * Inventory is deliberately NOT touched here - 10.3 owns the deduction
+ * trigger (confirmed directly), so stock moves on a KDS event, not on
+ * payment.
+ */
+export async function recordPayment(actor, shopId, orderId, data) {
+  await requireAccessTill(actor, shopId);
+  const order = await getOrderOrThrow(shopId, orderId);
+
+  if (!PAYABLE_ORDER_STATUSES.includes(order.status)) {
+    throw new AppError(`Cannot take payment on an order with status '${order.status}'`, 400);
+  }
+
+  // Reuses 9.3/9.4's already-correct derived total - discounts applied and
+  // voided items excluded - rather than recomputing any of that here.
+  const currentDetail = await fetchOrderDetail(shopId, order.id);
+  const balanceDue = currentDetail.balanceDue;
+
+  if (balanceDue <= 0) {
+    throw new AppError('This order has no outstanding balance to pay', 400);
+  }
+
+  // Cash may be over-tendered (confirmed directly); only what's actually
+  // owed is ever credited, and the difference comes back as change. Card
+  // has nothing to give change from, so overpaying is simply rejected.
+  let amountToCredit;
+  let amountTendered = null;
+  let providerReference = null;
+
+  if (data.method === 'cash') {
+    amountTendered = roundMoney(data.amountTendered);
+    amountToCredit = Math.min(amountTendered, balanceDue);
+  } else {
+    amountToCredit = roundMoney(data.amount);
+    if (amountToCredit > balanceDue) {
+      throw new AppError(
+        `Payment amount cannot exceed the outstanding balance (${balanceDue.toFixed(2)})`,
+        400
+      );
+    }
+
+    // The provider is charged BEFORE anything is written - a failed charge
+    // must leave no payment row behind. (The reverse order would need a
+    // compensating delete, which is exactly the kind of partial-write
+    // cleanup this project has no transaction wrapper to make safe.)
+    const result = await paymentProvider.chargeCard({
+      amount: amountToCredit,
+      orderId: order.id,
+    });
+    if (!result.success) {
+      throw new AppError(result.failureReason ?? 'Card payment was declined', 402);
+    }
+    providerReference = result.providerReference;
+  }
+
+  amountToCredit = roundMoney(amountToCredit);
+
+  await orderRepository.createOrderPayment(order.id, {
+    method: data.method,
+    amount: amountToCredit,
+    amountTendered,
+    providerReference,
+    actorType: actor.type,
+    actorId: actor.id,
+  });
+
+  const newAmountPaid = roundMoney(currentDetail.amountPaid + amountToCredit);
+  const nextStatus = newAmountPaid >= currentDetail.total ? 'paid' : 'partially_paid';
+  await orderRepository.setOrderStatus(order.id, nextStatus);
 
   return fetchOrderDetail(shopId, order.id);
 }

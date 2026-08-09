@@ -9,6 +9,7 @@ import {
   orderItemIdParamSchema,
   discountInputSchema,
   cancellationInputSchema,
+  paymentInputSchema,
 } from './order.validation.js';
 import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
 
@@ -77,6 +78,17 @@ router.post(
   validateParams(orderItemIdParamSchema),
   validateBody(cancellationInputSchema),
   orderController.voidOrderItem
+);
+
+// --- Payments, cash and card, split/partial (9.5) ---
+
+// One call per payment - splitting a bill is simply calling this more than
+// once, same "multiple receipts per PO" precedent as 7.6.
+router.post(
+  '/:orderId/payments',
+  validateParams(orderIdParamSchema),
+  validateBody(paymentInputSchema),
+  orderController.recordPayment
 );
 
 export default router;

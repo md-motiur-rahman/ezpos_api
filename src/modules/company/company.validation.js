@@ -19,4 +19,14 @@ export const businessTypeSchema = z.object({
   businessType: z.enum(['single', 'chain']),
 });
 
+// 'platform' - card payments go through our payment provider (9.5's seam).
+// 'own'       - the shop takes card on its own bank-supplied terminal; the
+//               till still records the transaction as 'card', we just never
+//               call a provider for it.
+// Same inline-enum style as businessTypeSchema above - this module keeps its
+// small fixed sets in the schema rather than a separate constants file.
+export const cardPaymentModeSchema = z.object({
+  cardPaymentMode: z.enum(['platform', 'own']),
+});
+
 export const billingHistoryQuerySchema = limitQuerySchema;

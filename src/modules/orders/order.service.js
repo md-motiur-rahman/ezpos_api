@@ -4,8 +4,9 @@ import { PERMISSIONS } from '../staff/permissions.js';
 import { resolveActorAuthority, assertHasPermission } from '../staff/actorAuthority.js';
 import * as shopMenuService from '../menu/shopMenu.service.js';
 import * as orderRepository from './order.repository.js';
+import * as companyRepository from '../company/company.repository.js';
 import * as paymentProvider from './paymentProvider.js';
-import { PAYABLE_ORDER_STATUSES } from './orderConstants.js';
+import { PAYABLE_ORDER_STATUSES, REFUNDABLE_ORDER_STATUSES } from './orderConstants.js';
 
 /**
  * Every monetary value out of `pg` arrives as a STRING, not a number
@@ -40,6 +41,12 @@ async function requireAccessTill(actor, shopId) {
  * Separate gate from ACCESS_TILL (9.3, confirmed directly) - Manager/Shift
  * Manager get it by default, Server/Chef don't but can be granted it via
  * 4.4's override system like any other permission, with zero extra code.
+ *
+ * 9.6 REUSES this same gate for refunds (confirmed directly) rather than
+ * introducing a PROCESS_REFUND permission: giving money back is the same
+ * class of till discretion as marking an order down, and the staff who can
+ * do one are the staff trusted to do the other. Nothing about this function
+ * changed for 9.6 - only a second set of callers.
  */
 async function requireApplyDiscount(actor, shopId) {
   const authority = await resolveActorAuthority(actor, shopId);
@@ -164,14 +171,45 @@ function toItemResponse(row, modifiers) {
   };
 }
 
+/** One refund row (9.6). `providerReference` is the REFUND's own reference (card only), not the original charge's. */
+function toRefundResponse(row) {
+  return {
+    id: row.id,
+    amount: toMoney(row.amount),
+    reason: row.reason,
+    providerReference: row.provider_reference,
+    refundedByActorType: row.refunded_by_actor_type,
+    refundedByActorId: row.refunded_by_actor_id,
+    createdAt: row.created_at,
+  };
+}
+
+/**
+ * The ONE definition of "how much has been refunded" (9.6) - used both by
+ * toPaymentResponse below (for the response) and by refundPayment (for the
+ * refundable-balance check), so the number the till is shown and the number
+ * the validation enforces can never disagree. Same reasoning as 9.5 summing
+ * amountPaid in JS from the payment rows rather than via a second SQL
+ * aggregate that could drift from the itemized list.
+ */
+function sumRefundAmounts(refunds) {
+  return refunds.reduce((sum, refund) => sum + refund.amount, 0);
+}
+
 /**
  * One payment row (9.5). `change` is DERIVED here, never stored - what the
  * customer handed over minus what was actually credited to the order. Card
  * payments have no tendered/change concept at all, so both are null.
+ *
+ * `refunds` (9.6) is DEFAULTED to [], exactly as toDetailResponse defaults
+ * `payments`, so this signature change cannot alter the behaviour of any
+ * pre-9.6 caller. With no refunds, amountRefunded is 0 and netAmount equals
+ * amount - i.e. every field 9.5 returned keeps its exact prior value.
  */
-function toPaymentResponse(row) {
+function toPaymentResponse(row, refunds = []) {
   const amount = toMoney(row.amount);
   const amountTendered = row.amount_tendered === null ? null : toMoney(row.amount_tendered);
+  const amountRefunded = sumRefundAmounts(refunds);
   return {
     id: row.id,
     method: row.method,
@@ -181,6 +219,12 @@ function toPaymentResponse(row) {
     providerReference: row.provider_reference,
     paidByActorType: row.paid_by_actor_type,
     paidByActorId: row.paid_by_actor_id,
+    // New in 9.6 - empty/0/full-amount for a payment that has never been
+    // refunded. netAmount is also exactly the amount still refundable
+    // against this payment, which is what refundPayment validates against.
+    refunds,
+    amountRefunded: roundMoney(amountRefunded),
+    netAmount: roundMoney(amount - amountRefunded),
     createdAt: row.created_at,
   };
 }
@@ -209,7 +253,14 @@ function toDetailResponse(order, items, payments = []) {
   // of the aggregate and the itemized list disagreeing. (A SQL SUM() over
   // zero rows also returns NULL rather than 0 - verified empirically - so
   // this avoids that trap entirely.)
+  //
+  // amountPaid deliberately keeps its exact 9.5 meaning: GROSS, every
+  // payment ever taken, ignoring refunds. 9.6 adds the refunded and net
+  // figures as NEW fields alongside it rather than redefining it, so no
+  // pre-9.6 consumer sees a changed number.
   const amountPaid = payments.reduce((sum, payment) => sum + payment.amount, 0);
+  const amountRefunded = payments.reduce((sum, payment) => sum + (payment.amountRefunded ?? 0), 0);
+  const netAmountPaid = amountPaid - amountRefunded;
   return {
     id: order.id,
     shopId: order.shop_id,
@@ -226,7 +277,9 @@ function toDetailResponse(order, items, payments = []) {
     // meaning. VAT (9.8) is still a separate, not-yet-built submodule; this
     // is not a final total. Cancelling the whole order does NOT zero this
     // out - `status`/`cancellation` are the authoritative "not charged"
-    // signal, this stays a record of what the order contained.
+    // signal, this stays a record of what the order contained. Refunding
+    // (9.6) likewise does not alter it: what was ordered is unchanged by
+    // money coming back out.
     subtotal: Number(subtotal.toFixed(2)),
     // New in 9.3 - all zero/null for an order with no discounts anywhere.
     itemDiscountTotal: Number(itemDiscountTotal.toFixed(2)),
@@ -239,7 +292,15 @@ function toDetailResponse(order, items, payments = []) {
     // every field 9.1-9.4 already returned is unaffected.
     payments,
     amountPaid: roundMoney(amountPaid),
-    balanceDue: roundMoney(Math.max(0, total - amountPaid)),
+    // New in 9.6 - both 0/equal-to-amountPaid for an order with no refunds.
+    amountRefunded: roundMoney(amountRefunded),
+    netAmountPaid: roundMoney(netAmountPaid),
+    // The ONE field 9.6 changes the formula of: was `total - amountPaid`,
+    // now `total - netAmountPaid`. Provably identical for every order that
+    // has never been refunded (amountRefunded is 0, so netAmountPaid ===
+    // amountPaid), which is every order 9.1-9.5's tests produce - and
+    // correctly REOPENS the balance once money is given back.
+    balanceDue: roundMoney(Math.max(0, total - netAmountPaid)),
     createdAt: order.created_at,
     updatedAt: order.updated_at,
   };
@@ -267,6 +328,12 @@ async function fetchOrderDetail(shopId, orderId) {
     itemRows.map((row) => row.id)
   );
   const paymentRows = await orderRepository.listPaymentsForOrder(order.id);
+  // 9.6 - one bulk query across every payment, not one per payment (same
+  // N+1 avoidance as listModifiersForOrderItems above). Safe no-op returning
+  // [] when the order has no payments at all.
+  const refundRows = await orderRepository.listRefundsForPayments(
+    paymentRows.map((row) => row.id)
+  );
 
   const modifiersByOrderItemId = new Map();
   for (const row of modifierRows) {
@@ -275,8 +342,18 @@ async function fetchOrderDetail(shopId, orderId) {
     modifiersByOrderItemId.set(row.order_item_id, list);
   }
 
+  const refundsByPaymentId = new Map();
+  for (const row of refundRows) {
+    const list = refundsByPaymentId.get(row.payment_id) ?? [];
+    list.push(toRefundResponse(row));
+    refundsByPaymentId.set(row.payment_id, list);
+  }
+
   const items = itemRows.map((row) => toItemResponse(row, modifiersByOrderItemId.get(row.id) ?? []));
-  return toDetailResponse(order, items, paymentRows.map(toPaymentResponse));
+  const payments = paymentRows.map((row) =>
+    toPaymentResponse(row, refundsByPaymentId.get(row.id) ?? [])
+  );
+  return toDetailResponse(order, items, payments);
 }
 
 /** Locates a resolved menu entry (master or local) for the requested item reference. */
@@ -605,6 +682,25 @@ export async function voidOrderItem(actor, shopId, orderId, orderItemId, data) {
 }
 
 /**
+ * Whether this company's card payments route through OUR payment provider.
+ *
+ * 'own' means the shop takes card on its own bank-supplied terminal: the
+ * till still offers cash/card and still records the transaction as 'card',
+ * but no provider is called, because the money was already taken out of band
+ * on their machine. There is nothing for us to charge, and pretending to
+ * charge it would produce a provider reference for a transaction we never
+ * made.
+ *
+ * Falls back to 'platform' if the company row or the column is somehow
+ * absent - that is the behaviour that has always existed, and defaulting the
+ * other way could silently skip a real charge. The column is NOT NULL
+ * DEFAULT 'platform', so this fallback should be unreachable in practice.
+ */
+function usesPlatformCardProcessing(company) {
+  return (company?.card_payment_mode ?? 'platform') === 'platform';
+}
+
+/**
  * Records one payment against an order (9.5). Split/partial payment is
  * simply calling this more than once - same "multiple receipts per PO"
  * precedent as 7.6, rather than one row that gets topped up.
@@ -662,18 +758,25 @@ export async function recordPayment(actor, shopId, orderId, data) {
       );
     }
 
-    // The provider is charged BEFORE anything is written - a failed charge
-    // must leave no payment row behind. (The reverse order would need a
-    // compensating delete, which is exactly the kind of partial-write
-    // cleanup this project has no transaction wrapper to make safe.)
-    const result = await paymentProvider.chargeCard({
-      amount: amountToCredit,
-      orderId: order.id,
-    });
-    if (!result.success) {
-      throw new AppError(result.failureReason ?? 'Card payment was declined', 402);
+    // Companies using their OWN card terminal skip the provider entirely -
+    // the transaction is still recorded as 'card', it just has no provider
+    // reference, exactly like cash has none. Resolved from the SHOP, since a
+    // staff-authenticated till request never carries the owner's user id.
+    const company = await companyRepository.findCompanyByShopId(shopId);
+    if (usesPlatformCardProcessing(company)) {
+      // The provider is charged BEFORE anything is written - a failed charge
+      // must leave no payment row behind. (The reverse order would need a
+      // compensating delete, which is exactly the kind of partial-write
+      // cleanup this project has no transaction wrapper to make safe.)
+      const result = await paymentProvider.chargeCard({
+        amount: amountToCredit,
+        orderId: order.id,
+      });
+      if (!result.success) {
+        throw new AppError(result.failureReason ?? 'Card payment was declined', 402);
+      }
+      providerReference = result.providerReference;
     }
-    providerReference = result.providerReference;
   }
 
   amountToCredit = roundMoney(amountToCredit);
@@ -687,8 +790,126 @@ export async function recordPayment(actor, shopId, orderId, data) {
     actorId: actor.id,
   });
 
-  const newAmountPaid = roundMoney(currentDetail.amountPaid + amountToCredit);
+  // netAmountPaid rather than amountPaid (9.6): provably the SAME number
+  // here, because this function can only run on a 'open'/'partially_paid'
+  // order and any refund immediately moves the status to
+  // 'partially_refunded'/'refunded' - so amountRefunded is necessarily 0 on
+  // every order that reaches this line. Using the net figure keeps this
+  // correct by construction rather than by coincidence, should a later
+  // submodule ever make a refunded order payable again.
+  const newAmountPaid = roundMoney(currentDetail.netAmountPaid + amountToCredit);
   const nextStatus = newAmountPaid >= currentDetail.total ? 'paid' : 'partially_paid';
+  await orderRepository.setOrderStatus(order.id, nextStatus);
+
+  return fetchOrderDetail(shopId, order.id);
+}
+
+/**
+ * Refunds part or all of ONE payment (9.6).
+ *
+ * Targets a specific payment rather than an order-level pool (confirmed
+ * directly): a card refund has to reverse against that charge's own
+ * provider reference, which an order-wide pool could not identify on a
+ * split cash+card order. Partial refunds are simply calling this more than
+ * once against the same payment - same "multiple payments per order" /
+ * "multiple receipts per PO" precedent, rather than one row topped up.
+ *
+ * Gated on APPLY_DISCOUNT (confirmed directly), reusing 9.3's existing
+ * permission rather than introducing a new one - Manager and Shift Manager
+ * hold it by default, Server and Chef don't but can be granted it through
+ * 4.4's override system like any other permission.
+ *
+ * order_payments is NEVER mutated - the correction is a new order_refunds
+ * row, exactly as that table's own 9.5 migration comment anticipated.
+ *
+ * KNOWN LIMITATION, deliberately accepted and identical in shape to 9.5's:
+ * the refundable balance is read immediately before the insert, not inside
+ * a transaction (this project has no transaction wrapper anywhere, and 9.6
+ * does not introduce one). Two genuinely simultaneous refunds against the
+ * same payment could therefore both pass the check. Narrow window given the
+ * single-till reality; flagged rather than hidden.
+ */
+export async function refundPayment(actor, shopId, orderId, paymentId, data) {
+  await requireApplyDiscount(actor, shopId);
+  const order = await getOrderOrThrow(shopId, orderId);
+
+  if (!REFUNDABLE_ORDER_STATUSES.includes(order.status)) {
+    throw new AppError(`Cannot refund an order with status '${order.status}'`, 400);
+  }
+
+  // Scoped to this order in SQL, so a paymentId belonging to a different
+  // order is a 404 rather than a cross-order refund - same precedent as
+  // findOrderItemForOrder for 9.3/9.4's line-item routes.
+  const payment = await orderRepository.findOrderPaymentForOrder(paymentId, order.id);
+  if (!payment) {
+    throw new AppError('Payment not found', 404);
+  }
+
+  const existingRefunds = await orderRepository.listRefundsForPayments([payment.id]);
+  const alreadyRefunded = sumRefundAmounts(existingRefunds.map(toRefundResponse));
+  // Exactly the `netAmount` the response exposes for this payment - same
+  // helper, same rows, so the figure validated against and the figure the
+  // till displays cannot diverge.
+  const refundable = roundMoney(toMoney(payment.amount) - alreadyRefunded);
+
+  if (refundable <= 0) {
+    throw new AppError('This payment has already been fully refunded', 400);
+  }
+
+  const amount = roundMoney(data.amount);
+  if (amount > refundable) {
+    throw new AppError(
+      `Refund amount cannot exceed the refundable balance of this payment (${refundable.toFixed(2)})`,
+      400
+    );
+  }
+
+  // The method is taken from the PAYMENT, never from the caller - a card
+  // charge can only be refunded to that card, and cash only as cash.
+  //
+  // Whether to call the provider keys off THIS PAYMENT's own
+  // provider_reference, deliberately NOT off the company's current
+  // card_payment_mode. An owner may switch card terminals between taking a
+  // payment and refunding it, and reading the live setting would then be
+  // wrong in both directions: it could skip reversing a charge our provider
+  // really did take (money left sitting on a customer's card), or call the
+  // provider to reverse a charge it never made. A payment that has a
+  // reference was processed by us and must be reversed by us; one without
+  // was taken on the shop's own terminal and is refunded on that same
+  // terminal, out of band - so we only record it. Correct by construction,
+  // whatever the setting says today.
+  let providerReference = null;
+  if (payment.method === 'card' && payment.provider_reference) {
+    // The provider is called BEFORE anything is written, same ordering and
+    // same reason as recordPayment's charge above: a failed refund must
+    // leave no order_refunds row behind, and this project has no
+    // transaction wrapper to make a compensating delete safe.
+    const result = await paymentProvider.refundCard({
+      amount,
+      providerReference: payment.provider_reference,
+      orderId: order.id,
+    });
+    if (!result.success) {
+      throw new AppError(result.failureReason ?? 'Card refund was declined', 402);
+    }
+    providerReference = result.providerReference;
+  }
+
+  await orderRepository.createOrderRefund(payment.id, {
+    amount,
+    reason: data.reason ?? null,
+    providerReference,
+    actorType: actor.type,
+    actorId: actor.id,
+  });
+
+  // Recomputed across EVERY payment on the order, not just the one just
+  // refunded - on a split cash+card order, fully refunding the cash leg
+  // alone must still leave the order 'partially_refunded'. Read back
+  // through fetchOrderDetail so there is one definition of netAmountPaid
+  // rather than a second sum computed here that could drift from it.
+  const detailAfterRefund = await fetchOrderDetail(shopId, order.id);
+  const nextStatus = detailAfterRefund.netAmountPaid <= 0 ? 'refunded' : 'partially_refunded';
   await orderRepository.setOrderStatus(order.id, nextStatus);
 
   return fetchOrderDetail(shopId, order.id);

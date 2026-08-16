@@ -3,6 +3,7 @@ import { buildUpdateSet } from "../../utils/sql.js";
 
 const COLUMNS = `id, owner_user_id, name, address_line1, address_line2, city, postcode,
                  country, phone, vat_number, company_number, business_type,
+                 card_payment_mode,
                  stripe_customer_id, stripe_subscription_id, trial_ends_at,
                  subscription_status, grace_period_ends_at, created_at, updated_at`;
 
@@ -73,6 +74,34 @@ export async function setBusinessType(companyId, businessType) {
     [businessType, companyId],
   );
   return rows[0];
+}
+
+export async function setCardPaymentMode(companyId, cardPaymentMode) {
+  const { rows } = await query(
+    `UPDATE companies SET card_payment_mode = $1, updated_at = now() WHERE id = $2 RETURNING ${COLUMNS}`,
+    [cardPaymentMode, companyId],
+  );
+  return rows[0];
+}
+
+/**
+ * Resolves the company that owns a shop. Needed by the till (Module 9): a
+ * staff-authenticated payment knows its shopId but never the owner's user id,
+ * so findActiveCompanyByOwner above can't be reused there.
+ *
+ * A subquery rather than a JOIN specifically so ${COLUMNS} is reused verbatim
+ * with no table alias prefix - one definition of the column list, no second
+ * copy to drift out of sync. A missing/deleted shop makes the subquery NULL,
+ * which matches no row, so this correctly returns null rather than throwing.
+ */
+export async function findCompanyByShopId(shopId) {
+  const { rows } = await query(
+    `SELECT ${COLUMNS} FROM companies
+     WHERE id = (SELECT company_id FROM shops WHERE id = $1 AND deleted_at IS NULL)
+       AND deleted_at IS NULL`,
+    [shopId],
+  );
+  return rows[0] ?? null;
 }
 
 export async function setStripeCustomerId(companyId, stripeCustomerId) {

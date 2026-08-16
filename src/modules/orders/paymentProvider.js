@@ -8,18 +8,16 @@ import crypto from 'node:crypto';
  * there is no SDK to call and nothing here touches the network in ANY
  * environment - deliberately unlike utils/stripe.js, which fakes only under
  * config.env.isTest because it DOES have a real backend the rest of the
- * time. Once a vendor exists, 13.1 replaces this function's body with a real
- * SDK call and every caller keeps working unchanged, because callers only
- * ever depend on the { success, providerReference, failureReason } shape
- * below - never on how it was produced.
+ * time. Once a vendor exists, 13.1 replaces these functions' bodies with
+ * real SDK calls and every caller keeps working unchanged, because callers
+ * only ever depend on the { success, providerReference, failureReason }
+ * shape below - never on how it was produced.
  *
- * Deliberately NOT modelled here (out of 9.5's scope, and each would be a
- * guess at a vendor whose API nobody has seen yet):
+ * Deliberately NOT modelled here (out of scope, and each would be a guess
+ * at a vendor whose API nobody has seen yet):
  *   - card tokenization / PAN handling - the till app talks to the terminal,
  *     this API never sees card data
  *   - 3DS / SCA challenge flows
- *   - provider-side refunds (9.6 owns refunds; it will extend this same
- *     interface with its own function rather than overloading this one)
  */
 
 /**
@@ -44,5 +42,36 @@ export async function chargeCard({ amount, orderId }) {
   return {
     success: true,
     providerReference: `placeholder_${crypto.randomUUID()}`,
+  };
+}
+
+/**
+ * Module 9.6 - refunds a previously-charged card.
+ *
+ * A SEPARATE function extending this same interface rather than an extra
+ * mode on chargeCard - exactly as 9.5's own comment here anticipated
+ * ("9.6 owns refunds; it will extend this same interface with its own
+ * function rather than overloading this one"). Every real card provider
+ * models a refund as its own operation against the original transaction,
+ * not as a negative charge, so this signature takes the ORIGINAL charge's
+ * `providerReference` as the thing being reversed.
+ *
+ * Returns the identical { success, providerReference, failureReason } shape
+ * as chargeCard, and likewise does NOT throw on a provider-side rejection -
+ * a refused refund is a business outcome the till must show the cashier.
+ * The `providerReference` returned here is the REFUND's own reference, a
+ * distinct value from the charge reference passed in, which is why the
+ * caller stores it in order_refunds.provider_reference rather than reusing
+ * the payment's.
+ *
+ * Today this always succeeds, for the same reason chargeCard does. The
+ * caller's failure path (402, no refund row written, order status
+ * untouched) was proven non-vacuous by temporarily forcing this to return
+ * { success: false } and confirming that behaviour, then reverting.
+ */
+export async function refundCard({ amount, providerReference, orderId }) {
+  return {
+    success: true,
+    providerReference: `placeholder_refund_${crypto.randomUUID()}`,
   };
 }

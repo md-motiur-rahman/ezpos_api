@@ -6,6 +6,7 @@ import {
   createCompanySchema,
   updateCompanySchema,
   businessTypeSchema,
+  cardPaymentModeSchema,
   billingHistoryQuerySchema,
 } from './company.validation.js';
 import menuRoutes from '../menu/menu.routes.js';
@@ -22,6 +23,13 @@ router.post(
   '/mine/business-type',
   validateBody(businessTypeSchema),
   companyController.setBusinessType
+);
+// Own dedicated action rather than part of PATCH /mine, same reasoning as
+// business-type above: this decides how money is actually taken.
+router.post(
+  '/mine/card-payment-mode',
+  validateBody(cardPaymentModeSchema),
+  companyController.setCardPaymentMode
 );
 // Deliberately NOT behind requireActiveBilling (3.6): this is exactly the
 // visibility a locked-out owner needs to see what they owe and pay it.

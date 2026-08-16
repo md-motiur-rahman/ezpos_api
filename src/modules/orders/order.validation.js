@@ -115,3 +115,25 @@ export const paymentInputSchema = z.discriminatedUnion('method', [
   cashPaymentSchema,
   cardPaymentSchema,
 ]);
+
+// --- Refunds, per payment, full or partial (9.6) ---
+
+export const paymentIdParamSchema = orderIdParamSchema.extend({
+  paymentId: z.string().uuid('Invalid payment id'),
+});
+
+// Deliberately NOT a discriminated union like paymentInputSchema above -
+// a refund's input is identical for cash and card, because the METHOD is
+// never supplied by the caller: it's taken from the payment being refunded
+// (order_refunds has no method column of its own - "derive, don't store").
+// A caller cannot ask to refund a card payment as cash.
+//
+// `amount` is always required and always explicit - there is no "refund
+// the whole thing" shorthand, deliberately: refunding is a money-out
+// action, so the amount the staff member intends is stated rather than
+// inferred. It's validated at issue time against the payment's own
+// remaining refundable balance (see refundPayment in the service).
+export const refundInputSchema = z.object({
+  amount: z.number().positive('amount must be greater than 0'),
+  reason: z.string().trim().min(1, 'reason cannot be empty').optional(),
+});

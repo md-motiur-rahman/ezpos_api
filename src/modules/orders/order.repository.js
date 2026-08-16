@@ -274,7 +274,8 @@ export async function listPaymentsForOrder(orderId) {
  * or 'paid'. Deliberately a narrow status-only update rather than a generic
  * setter: 9.4's cancelOrder writes its own audit columns alongside its
  * status change, and keeping these separate means neither can accidentally
- * clobber the other's fields.
+ * clobber the other's fields. Reused unchanged by 9.6's refunds, which set
+ * 'partially_refunded'/'refunded' through this same function.
  */
 export async function setOrderStatus(orderId, status) {
   const { rows } = await query(
@@ -297,6 +298,63 @@ export async function listModifiersForOrderItems(orderItemIds) {
      WHERE oim.order_item_id = ANY($1::uuid[])
      ORDER BY oim.created_at`,
     [orderItemIds]
+  );
+  return rows;
+}
+
+// --- Refunds, per payment, full or partial (9.6) ---
+
+const REFUND_COLUMNS = `id, payment_id, amount, reason, provider_reference,
+                       refunded_by_actor_type, refunded_by_actor_id, created_at`;
+
+/**
+ * Scoped to order_id as well as id (9.6), exactly like findOrderItemForOrder
+ * above - so a refund request can never reach a payment belonging to a
+ * different order via a stale or foreign paymentId. The caller turns a miss
+ * into a 404.
+ */
+export async function findOrderPaymentForOrder(paymentId, orderId) {
+  const { rows } = await query(
+    `SELECT ${PAYMENT_COLUMNS} FROM order_payments WHERE id = $1 AND order_id = $2`,
+    [paymentId, orderId]
+  );
+  return rows[0] ?? null;
+}
+
+/** Immutable insert (9.6) - no update path, same as payments/receipts/wastage/scans. */
+export async function createOrderRefund(
+  paymentId,
+  { amount, reason, providerReference, actorType, actorId }
+) {
+  const { rows } = await query(
+    `INSERT INTO order_refunds
+       (payment_id, amount, reason, provider_reference,
+        refunded_by_actor_type, refunded_by_actor_id)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING ${REFUND_COLUMNS}`,
+    [paymentId, amount, reason ?? null, providerReference ?? null, actorType, actorId]
+  );
+  return rows[0];
+}
+
+/**
+ * Bulk fetch across every payment on the order in one query, avoiding N+1 -
+ * same shape and same empty-array guard as listModifiersForOrderItems above.
+ * Grouping by payment_id is response-shaping, done in the service layer.
+ *
+ * Row ORDER here is presentational only: the service sums these amounts, and
+ * addition is order-independent, so a created_at tie between two refunds
+ * issued in the same instant cannot affect any total.
+ */
+export async function listRefundsForPayments(paymentIds) {
+  if (paymentIds.length === 0) {
+    return [];
+  }
+  const { rows } = await query(
+    `SELECT ${REFUND_COLUMNS} FROM order_refunds
+     WHERE payment_id = ANY($1::uuid[])
+     ORDER BY created_at`,
+    [paymentIds]
   );
   return rows;
 }

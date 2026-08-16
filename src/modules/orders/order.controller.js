@@ -77,3 +77,16 @@ export const recordPayment = asyncHandler(async (req, res) => {
   );
   res.status(201).json(order);
 });
+
+// 201 - a refund CREATES a new immutable order_refunds row, same as
+// recordPayment creating a payment row, rather than mutating anything.
+export const refundPayment = asyncHandler(async (req, res) => {
+  const order = await orderService.refundPayment(
+    req.actor,
+    req.params.shopId,
+    req.params.orderId,
+    req.params.paymentId,
+    req.body
+  );
+  res.status(201).json(order);
+});

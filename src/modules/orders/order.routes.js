@@ -10,6 +10,8 @@ import {
   discountInputSchema,
   cancellationInputSchema,
   paymentInputSchema,
+  paymentIdParamSchema,
+  refundInputSchema,
 } from './order.validation.js';
 import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
 
@@ -21,10 +23,12 @@ import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
  *
  * ACCESS_TILL gates every route here, including GET - same "reading and
  * creating share one permission gate" precedent as 7.7's wastage logs -
- * except the discount routes (9.3), which are APPLY_DISCOUNT-gated instead.
+ * except the discount routes (9.3) and the refund route (9.6), which are
+ * APPLY_DISCOUNT-gated instead.
  * No DELETE anywhere - cancellation/void (9.4) are their own explicit
- * actions, not a resource deletion, same "no reversal mechanism, correct
- * via a new action" philosophy as wastage/receipts.
+ * actions, not a resource deletion, and a refund (9.6) is a new record
+ * rather than the removal of a payment, same "no reversal mechanism,
+ * correct via a new action" philosophy as wastage/receipts.
  */
 const router = Router({ mergeParams: true });
 
@@ -89,6 +93,22 @@ router.post(
   validateParams(orderIdParamSchema),
   validateBody(paymentInputSchema),
   orderController.recordPayment
+);
+
+// --- Refunds, per payment, full or partial (9.6) ---
+
+// Hangs off the PAYMENT being refunded, not the order - a refund always
+// reverses one specific payment (a card charge can only be returned to that
+// card). Partial refunds are simply calling this more than once against the
+// same payment. No route-ordering hazard with '/:orderId/payments' above:
+// that one is POST on a strictly shorter path, so neither can swallow the
+// other the way a literal segment and a ':param' at the SAME depth would
+// (the /latest-before-/:scanId lesson from 8.3).
+router.post(
+  '/:orderId/payments/:paymentId/refund',
+  validateParams(paymentIdParamSchema),
+  validateBody(refundInputSchema),
+  orderController.refundPayment
 );
 
 export default router;

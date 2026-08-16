@@ -18,6 +18,11 @@ function toResponse(company) {
     vatNumber: company.vat_number,
     companyNumber: company.company_number,
     businessType: company.business_type,
+    // 'platform' (default - card payments route through our provider) or
+    // 'own' (the shop uses its own bank card terminal, so the till records
+    // a card transaction but never calls a provider). Never null - the
+    // column is NOT NULL DEFAULT 'platform'.
+    cardPaymentMode: company.card_payment_mode,
     // User-facing (unlike stripe_customer_id / stripe_subscription_id, which
     // stay internal) - the dashboard needs it to show "X days left in trial".
     trialEndsAt: company.trial_ends_at,
@@ -100,6 +105,26 @@ export async function setBusinessType(ownerUserId, ownerEmail, { businessType })
   }
 
   const updated = await companyRepository.setBusinessType(company.id, businessType);
+  return toResponse(updated);
+}
+
+/**
+ * Chooses whether this company's card payments go through our payment
+ * provider ('platform') or are taken on the shop's own bank card terminal
+ * ('own'). Its own dedicated action rather than part of the generic
+ * PATCH /mine, exactly like setBusinessType above - this changes how money
+ * is actually taken, so it shouldn't be settable as an incidental field
+ * alongside a phone number.
+ *
+ * Deliberately NOT one-directional and NOT billing-gated: a shop can switch
+ * card terminals, and neither direction invalidates anything already
+ * recorded. Payments taken before a switch keep working correctly on refund
+ * because refunds key off the payment's own provider_reference, not this
+ * setting (see refundPayment in orders/order.service.js).
+ */
+export async function setCardPaymentMode(ownerUserId, { cardPaymentMode }) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  const updated = await companyRepository.setCardPaymentMode(company.id, cardPaymentMode);
   return toResponse(updated);
 }
 

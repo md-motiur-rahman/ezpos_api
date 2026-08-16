@@ -26,6 +26,11 @@ export const setBusinessType = asyncHandler(async (req, res) => {
   res.status(200).json(company);
 });
 
+export const setCardPaymentMode = asyncHandler(async (req, res) => {
+  const company = await companyService.setCardPaymentMode(req.user.id, req.body);
+  res.status(200).json(company);
+});
+
 export const getBillingHistory = asyncHandler(async (req, res) => {
   const history = await companyService.getBillingHistory(req.user.id, req.query);
   res.status(200).json(history);

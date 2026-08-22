@@ -6,7 +6,8 @@ const ORDER_COLUMNS = `id, shop_id, type, table_number, customer_name, status,
                        discount_type, discount_value, discount_reason,
                        discounted_by_actor_type, discounted_by_actor_id, discounted_at,
                        cancelled_at, cancelled_by_actor_type, cancelled_by_actor_id,
-                       cancellation_reason, was_prepped`;
+                       cancellation_reason, was_prepped,
+                       client_order_id, occurred_at, sync_payload_hash`;
 
 const ORDER_ITEM_DISCOUNT_COLUMNS = `discount_type, discount_value, discount_reason,
                        discounted_by_actor_type, discounted_by_actor_id, discounted_at`;
@@ -84,6 +85,7 @@ export async function listOrdersForShop(shopId) {
   const { rows } = await query(
     `SELECT o.id, o.shop_id, o.type, o.table_number, o.customer_name, o.status,
             o.created_by_actor_type, o.created_by_actor_id, o.created_at, o.updated_at,
+            o.client_order_id, o.occurred_at,
             count(oi.id)::int AS item_count
      FROM orders o
      LEFT JOIN order_items oi ON oi.order_id = o.id
@@ -275,7 +277,8 @@ export async function listPaymentsForOrder(orderId) {
  * setter: 9.4's cancelOrder writes its own audit columns alongside its
  * status change, and keeping these separate means neither can accidentally
  * clobber the other's fields. Reused unchanged by 9.6's refunds, which set
- * 'partially_refunded'/'refunded' through this same function.
+ * 'partially_refunded'/'refunded' through this same function, and by 9.7's
+ * offline sync, which sets 'paid'/'partially_paid' exactly as 9.5 does.
  */
 export async function setOrderStatus(orderId, status) {
   const { rows } = await query(
@@ -357,4 +360,82 @@ export async function listRefundsForPayments(paymentIds) {
     [paymentIds]
   );
   return rows;
+}
+
+// --- Offline sync (9.7) ---
+
+/**
+ * Inserts a queued offline order, deduplicated by the till's own
+ * client_order_id.
+ *
+ * Returns the new row, or NULL if this (shop_id, client_order_id) was
+ * already synced - deliberately the exact same contract as Module 3's
+ * billing recordEvent, which does the same thing for Stripe's retried
+ * webhook deliveries. A duplicate is an EXPECTED outcome here, not an
+ * error: a till with flaky connectivity will genuinely re-send a queued
+ * sale it never got an acknowledgement for, and that must be a no-op
+ * rather than a second order.
+ *
+ * The unique index does all the dedup work; the caller only has to read
+ * whether a row came back.
+ *
+ * THE `WHERE client_order_id IS NOT NULL` ON THE ON CONFLICT CLAUSE IS
+ * LOAD-BEARING AND MUST NOT BE REMOVED. It is not redundant with the
+ * NOT NULL-ness of the value being inserted - it is how Postgres IDENTIFIES
+ * which index this conflict targets. The index is partial, and a partial
+ * index is only matched by an inference clause that restates its predicate.
+ * Verified empirically against the real database before this was written:
+ * dropping the WHERE does not silently fall back to anything, it raises
+ * 42P10 "there is no unique or exclusion constraint matching the ON CONFLICT
+ * specification" and the insert fails outright.
+ */
+export async function createSyncedOrder(
+  shopId,
+  {
+    type,
+    tableNumber,
+    customerName,
+    createdByActorType,
+    createdByActorId,
+    clientOrderId,
+    occurredAt,
+    syncPayloadHash,
+  }
+) {
+  const { rows } = await query(
+    `INSERT INTO orders
+       (shop_id, type, table_number, customer_name, created_by_actor_type, created_by_actor_id,
+        client_order_id, occurred_at, sync_payload_hash)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     ON CONFLICT (shop_id, client_order_id) WHERE client_order_id IS NOT NULL
+     DO NOTHING
+     RETURNING ${ORDER_COLUMNS}`,
+    [
+      shopId,
+      type,
+      tableNumber ?? null,
+      customerName ?? null,
+      createdByActorType,
+      createdByActorId,
+      clientOrderId,
+      occurredAt,
+      syncPayloadHash,
+    ]
+  );
+  return rows[0] ?? null;
+}
+
+/**
+ * Looks up an already-synced order by the till's own key (9.7), scoped to
+ * the shop for the same reason every other lookup in this file is: one
+ * shop's client_order_id must never reach another's order. Used only on the
+ * duplicate path, to decide between returning the original (a genuine
+ * replay) and rejecting a key collision.
+ */
+export async function findOrderByClientOrderId(shopId, clientOrderId) {
+  const { rows } = await query(
+    `SELECT ${ORDER_COLUMNS} FROM orders WHERE shop_id = $1 AND client_order_id = $2`,
+    [shopId, clientOrderId]
+  );
+  return rows[0] ?? null;
 }

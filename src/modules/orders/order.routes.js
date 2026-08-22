@@ -12,6 +12,7 @@ import {
   paymentInputSchema,
   paymentIdParamSchema,
   refundInputSchema,
+  syncOfflineOrderSchema,
 } from './order.validation.js';
 import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
 
@@ -41,6 +42,28 @@ router.post(
   orderController.createOrder
 );
 router.get('/', validateParams(shopIdOnlyParamSchema), orderController.listOrders);
+
+// --- Offline sync (9.7) ---
+
+// Registered BEFORE '/:orderId' below. Strictly speaking the two cannot
+// collide today - this is a POST and that is a GET - but the literal
+// segment goes first regardless, following the same discipline as 8.3's
+// '/latest' before '/:scanId' and app.js's mount ordering: relying on the
+// methods differing would silently become a bug the day anyone adds a
+// GET /orders/sync or a POST /orders/:orderId, and the ordering costs
+// nothing to get right now.
+//
+// A POST, not a PUT, even though it is idempotent: it creates a resource,
+// and the idempotency key lives in the body rather than the URL (there is
+// no server-side path for a client-generated id). Replays are answered 200
+// vs a first sync's 201 - see the controller.
+router.post(
+  '/sync',
+  validateParams(shopIdOnlyParamSchema),
+  validateBody(syncOfflineOrderSchema),
+  orderController.syncOfflineOrder
+);
+
 router.get('/:orderId', validateParams(orderIdParamSchema), orderController.getOrder);
 
 // --- Adding items to an already-open order (9.2) ---

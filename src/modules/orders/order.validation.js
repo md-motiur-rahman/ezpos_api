@@ -137,3 +137,100 @@ export const refundInputSchema = z.object({
   amount: z.number().positive('amount must be greater than 0'),
   reason: z.string().trim().min(1, 'reason cannot be empty').optional(),
 });
+
+// --- Offline sync (9.7) ---
+
+/**
+ * One already-completed offline line.
+ *
+ * DELIBERATELY a different shape from orderItemSchema above, and the
+ * difference is the whole point of 9.7: an online order sends only WHAT was
+ * ordered and lets the server resolve the price from the live menu
+ * (resolveOrderLine), whereas an offline order sends the price the customer
+ * was ACTUALLY CHARGED on the device, against whatever menu that device had
+ * cached at the time. Confirmed directly: the server trusts that snapshot as
+ * historical fact rather than re-deriving it, because the cash has already
+ * changed hands - silently re-pricing a completed sale would make the synced
+ * record disagree with the receipt the customer is holding.
+ *
+ * So `unitPrice` is REQUIRED here (it is never sent for an online order),
+ * and modifiers are objects carrying their own `priceDelta` rather than the
+ * bare `modifierOptionIds` array an online order sends.
+ */
+const offlineOrderItemSchema = z
+  .object({
+    menuItemId: z.string().uuid('Invalid menu item id').optional(),
+    shopMenuItemId: z.string().uuid('Invalid shop menu item id').optional(),
+    variantId: z.string().uuid('Invalid variant id').optional(),
+    quantity: z.number().int('quantity must be a whole number').positive('quantity must be greater than 0'),
+    // nonnegative, not positive: a genuinely free line (a comped side, a
+    // £0.00 promotional item) is a real thing a till can ring up, and this
+    // is a historical record of what was charged, not a price being set.
+    unitPrice: z.number().nonnegative('unitPrice cannot be negative'),
+    modifiers: z
+      .array(
+        z.object({
+          modifierOptionId: z.string().uuid('Invalid modifier option id'),
+          // Signed on purpose - a modifier delta may legitimately be
+          // negative (e.g. "no cheese, -£0.50"), exactly as the live
+          // modifier_options price it snapshots may be.
+          priceDelta: z.number(),
+        })
+      )
+      .optional(),
+  })
+  .refine((item) => Boolean(item.menuItemId) !== Boolean(item.shopMenuItemId), {
+    message: 'Provide exactly one of menuItemId or shopMenuItemId',
+    path: ['menuItemId'],
+  });
+
+/**
+ * A queued offline sale.
+ *
+ * `payment` is REQUIRED, not optional (scope decision, flagged rather than
+ * assumed): the roadmap names this a "cash-order QUEUE", i.e. a queue of
+ * COMPLETED transactions. An offline order with no payment taken has no
+ * reason to have been queued at all - nothing was charged, so it can simply
+ * be rung up normally through 9.1's POST /orders once connectivity returns.
+ * Requiring it also keeps the idempotency contract crisp: one sync call
+ * represents exactly one finished sale.
+ *
+ * It reuses paymentInputSchema (9.5) UNCHANGED rather than defining its own
+ * cash/card shape - same discriminated union, same method-specific required
+ * fields, so a queued payment is validated identically to a live one.
+ */
+export const syncOfflineOrderSchema = z
+  .object({
+    // The device's own idempotency key. Bounded in length only - see the
+    // migration for why its FORMAT is deliberately not constrained to a
+    // uuid: it is the client's identifier for its own queue entry, and
+    // dictating its shape would be overreach.
+    clientOrderId: z
+      .string()
+      .trim()
+      .min(1, 'clientOrderId cannot be empty')
+      .max(200, 'clientOrderId is too long'),
+    // When the sale happened ON THE DEVICE. Required: without it a synced
+    // order would be indistinguishable from one rung up at sync time, and
+    // 12.x reporting would attribute an offline day's takings to whenever
+    // the till next found signal.
+    occurredAt: z.string().datetime({ offset: true, message: 'occurredAt must be an ISO 8601 datetime' }),
+    type: z.enum(ORDER_TYPES),
+    tableNumber: z.string().trim().min(1, 'tableNumber cannot be empty').optional(),
+    customerName: z.string().trim().min(1, 'customerName cannot be empty').optional(),
+    items: z.array(offlineOrderItemSchema).min(1, 'An order must have at least one item'),
+    payment: paymentInputSchema,
+  })
+  // Identical dine_in/takeaway rules to createOrderSchema - an order that
+  // happened offline is still the same kind of order, so it is held to the
+  // same structural rules. Restated rather than shared because
+  // createOrderSchema's refinements are attached to that specific object
+  // shape, which this one deliberately differs from (see above).
+  .refine((data) => (data.type === 'dine_in' ? Boolean(data.tableNumber) : true), {
+    message: 'tableNumber is required for dine_in orders',
+    path: ['tableNumber'],
+  })
+  .refine((data) => (data.type === 'takeaway' ? !data.tableNumber : true), {
+    message: 'tableNumber is not valid for takeaway orders',
+    path: ['tableNumber'],
+  });

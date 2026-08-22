@@ -90,3 +90,23 @@ export const refundPayment = asyncHandler(async (req, res) => {
   );
   res.status(201).json(order);
 });
+
+/**
+ * Offline sync (9.7) - the ONE handler here whose status code is not fixed,
+ * because the two outcomes are genuinely different events and the till needs
+ * to tell them apart:
+ *   201 - this queued sale was accepted and an order was created.
+ *   200 - it had already been synced; this was an idempotent replay and
+ *         nothing new was written.
+ * Both return the identical order body, so a client that ignores the
+ * distinction still behaves correctly - it just learns less. Hence the
+ * service returning { order, created } rather than the order alone.
+ */
+export const syncOfflineOrder = asyncHandler(async (req, res) => {
+  const { order, created } = await orderService.syncOfflineOrder(
+    req.actor,
+    req.params.shopId,
+    req.body
+  );
+  res.status(created ? 201 : 200).json(order);
+});

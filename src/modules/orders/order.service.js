@@ -69,6 +69,13 @@ function toListResponse(order) {
     createdByActorType: order.created_by_actor_type,
     createdByActorId: order.created_by_actor_id,
     itemCount: order.item_count,
+    // New in 9.7 - both null for every order created through the normal
+    // online flow, so this list's existing shape is unchanged for them.
+    // Present here (and not only on the detail response) so a till coming
+    // back online can reconcile its local queue against what actually
+    // landed, without fetching each order individually.
+    clientOrderId: order.client_order_id ?? null,
+    occurredAt: order.occurred_at ?? null,
     createdAt: order.created_at,
     updatedAt: order.updated_at,
   };
@@ -301,6 +308,13 @@ function toDetailResponse(order, items, payments = []) {
     // amountPaid), which is every order 9.1-9.5's tests produce - and
     // correctly REOPENS the balance once money is given back.
     balanceDue: roundMoney(Math.max(0, total - netAmountPaid)),
+    // New in 9.7 - both null for every order created through the normal
+    // online flow (9.1's POST /orders), which is every order 9.1-9.6's
+    // tests produce, so no previously-approved response value changes.
+    // occurredAt is a timestamptz (a real instant), NOT a `date`, so the
+    // 8.2 local-midnight trap does not apply and it serializes correctly.
+    clientOrderId: order.client_order_id ?? null,
+    occurredAt: order.occurred_at ?? null,
     createdAt: order.created_at,
     updatedAt: order.updated_at,
   };
@@ -451,6 +465,11 @@ function resolveOrderLine(resolvedMenu, line) {
  * same mechanism" precedent as inventory's adjustInventoryQuantities.
  * createOrder's own behavior is unchanged by this - same calls, same
  * order, still verified by its existing tests.
+ *
+ * 9.7's offline sync is the THIRD caller, reusing it completely unchanged:
+ * once a queued line has been structurally validated it is in exactly the
+ * same shape an online resolved line is, so it writes through the identical
+ * path.
  */
 async function writeResolvedItems(orderId, resolvedLines) {
   // Pre-generated, not left to the DB default - verified empirically that
@@ -913,4 +932,331 @@ export async function refundPayment(actor, shopId, orderId, paymentId, data) {
   await orderRepository.setOrderStatus(order.id, nextStatus);
 
   return fetchOrderDetail(shopId, order.id);
+}
+
+// --- Offline sync (9.7) ---
+
+/**
+ * Structurally validates ONE queued offline line.
+ *
+ * DELIBERATELY NOT resolveOrderLine, and the differences are the substance
+ * of 9.7 rather than an oversight. This checks only that the references are
+ * real and belong to this shop; it takes every PRICE from the client.
+ *
+ *  - The price is NOT re-derived from the live menu (confirmed directly).
+ *    The sale already completed on the device at the price the customer was
+ *    charged and, for cash, the money is already in the drawer. Re-pricing
+ *    it here against a menu that may have changed since would make the
+ *    stored record disagree with the receipt the customer holds, and would
+ *    make the drawer fail to reconcile.
+ *  - `isEnabled` is NOT checked, for items, variants or modifier options.
+ *    An item disabled or 86'd AFTER the offline sale must still sync -
+ *    rejecting it would discard a real sale that really happened, which is
+ *    strictly worse than recording a sale of something now unavailable.
+ *  - 6.4's modifier group min/max is NOT enforced (unlike resolveOrderLine,
+ *    which enforces it for the first time in 9.1). The offline till already
+ *    enforced it at sale time against its cached menu; re-enforcing against
+ *    a group whose configuration has since changed would reject a
+ *    legitimately-completed sale for a rule that did not exist when it was
+ *    made.
+ *
+ * What IS still enforced is the part that protects tenancy and referential
+ * integrity: the item must exist in THIS shop's resolved menu, and any
+ * variant/modifier option must genuinely belong to that item. Without this
+ * an offline payload could name another company's menu item, or a modifier
+ * from an unrelated item, and the FK constraints alone would not catch it.
+ *
+ * KNOWN LIMITATION, flagged rather than hidden: getResolvedMenu excludes
+ * SOFT-DELETED items, so an item deleted between the offline sale and the
+ * sync produces a 404 here. Deleting a menu item mid-service is rare and
+ * the offline window is expected to be short, but a sale of a since-deleted
+ * item cannot currently be synced.
+ */
+function resolveOfflineOrderLine(resolvedMenu, line) {
+  const item = findResolvedItem(resolvedMenu, line);
+  if (!item) {
+    throw new AppError('Menu item not found', 404);
+  }
+
+  if (line.variantId) {
+    const variant = item.variants.find((v) => v.id === line.variantId);
+    if (!variant) {
+      throw new AppError('Variant not found for this item', 404);
+    }
+  }
+
+  const modifiers = [];
+  for (const requested of line.modifiers ?? []) {
+    let found = null;
+    for (const group of item.modifierGroups) {
+      found = group.options.find((option) => option.id === requested.modifierOptionId);
+      if (found) break;
+    }
+    if (!found) {
+      throw new AppError('Modifier option not found for this item', 404);
+    }
+    // The option's IDENTITY is validated against the live menu; its PRICE
+    // comes from the client, for the same reason unitPrice does.
+    modifiers.push({ modifierOptionId: found.id, priceDelta: roundMoney(requested.priceDelta) });
+  }
+
+  return {
+    menuItemId: line.menuItemId ?? null,
+    shopMenuItemId: line.shopMenuItemId ?? null,
+    variantId: line.variantId ?? null,
+    quantity: line.quantity,
+    unitPrice: roundMoney(line.unitPrice),
+    modifiers,
+  };
+}
+
+/**
+ * Builds the canonical string whose hash decides replay-vs-collision.
+ *
+ * Constructed field by field in a FIXED order from the already-validated
+ * payload, deliberately rather than hashing the raw request body:
+ * JSON.stringify preserves insertion order for string keys, so building the
+ * object explicitly here makes the output independent of whatever key order
+ * the client happened to serialize, and independent of any extra keys zod
+ * stripped. Money is normalized through roundMoney first so that 10, 10.0
+ * and 10.00 all hash identically, and occurredAt through toISOString() so
+ * that '...T10:00:00Z' and '...T10:00:00.000Z' do too - otherwise a client
+ * that reformats its own queue entry between retries would get a spurious
+ * 409 on what is genuinely the same sale.
+ *
+ * shopId is included so the hash is meaningless outside its shop, even
+ * though the lookup is already shop-scoped - defence in depth, at no cost.
+ *
+ * Item and modifier ORDER is significant: a payload with the same lines in a
+ * different sequence hashes differently and is treated as a collision. That
+ * is the deliberate, safer direction - a device replaying its own queue
+ * entry re-sends the identical serialization, so a reorder is far more
+ * likely to indicate a genuinely different payload than a benign reshuffle.
+ */
+function canonicalizeSyncPayload(shopId, data) {
+  return JSON.stringify({
+    shopId,
+    clientOrderId: data.clientOrderId,
+    occurredAt: new Date(data.occurredAt).toISOString(),
+    type: data.type,
+    tableNumber: data.tableNumber ?? null,
+    customerName: data.customerName ?? null,
+    items: data.items.map((item) => ({
+      menuItemId: item.menuItemId ?? null,
+      shopMenuItemId: item.shopMenuItemId ?? null,
+      variantId: item.variantId ?? null,
+      quantity: item.quantity,
+      unitPrice: roundMoney(item.unitPrice),
+      modifiers: (item.modifiers ?? []).map((modifier) => ({
+        modifierOptionId: modifier.modifierOptionId,
+        priceDelta: roundMoney(modifier.priceDelta),
+      })),
+    })),
+    payment:
+      data.payment.method === 'cash'
+        ? { method: 'cash', amountTendered: roundMoney(data.payment.amountTendered) }
+        : { method: 'card', amount: roundMoney(data.payment.amount) },
+  });
+}
+
+function hashSyncPayload(shopId, data) {
+  return crypto.createHash('sha256').update(canonicalizeSyncPayload(shopId, data)).digest('hex');
+}
+
+/**
+ * The order total, derived from the resolved lines BEFORE anything is
+ * written.
+ *
+ * This exists so that every validation 9.7 performs can happen ahead of the
+ * first INSERT - see syncOfflineOrder for why that ordering is critical
+ * (a throw after the header lands would permanently burn the
+ * clientOrderId). It cannot wait for fetchOrderDetail, which by definition
+ * can only run after the rows exist.
+ *
+ * The arithmetic MIRRORS toItemResponse/toDetailResponse exactly, including
+ * where it rounds: each line is settled to 2dp individually first, then the
+ * lines are summed, then the sum is settled again. Rounding only at the end
+ * would disagree with the stored order by a penny on some inputs. A synced
+ * order has no discounts and no voided items, so total === subtotal here
+ * and the two paths are the same calculation on the same numbers - asserted
+ * by a test that syncs an order and checks this credit against the total
+ * that comes back from the database, rather than assumed.
+ */
+function computeResolvedLinesTotal(resolvedLines) {
+  const subtotal = resolvedLines.reduce((sum, line) => {
+    const modifierTotal = line.modifiers.reduce((acc, modifier) => acc + modifier.priceDelta, 0);
+    const lineTotal = Number(((line.unitPrice + modifierTotal) * line.quantity).toFixed(2));
+    return sum + lineTotal;
+  }, 0);
+  return Number(subtotal.toFixed(2));
+}
+
+/**
+ * Syncs one order that was rung up and PAID while the till had no
+ * connectivity (9.7).
+ *
+ * Returns `{ order, created }` rather than the order alone - the only
+ * service function here that does - because the caller needs to distinguish
+ * a first sync (201) from an idempotent replay (200), and that fact isn't
+ * recoverable from the order body itself.
+ *
+ * IDEMPOTENCY is the whole point. The till generates its own
+ * `clientOrderId` at the moment of sale and re-sends the queued entry until
+ * it gets an acknowledgement, so the same sale WILL arrive more than once
+ * whenever a response is lost in flight. A partial unique index on
+ * (shop_id, client_order_id) plus ON CONFLICT DO NOTHING makes the database
+ * itself the arbiter - the identical mechanism Module 3 already uses for
+ * Stripe's retried webhook deliveries, rather than a new invention.
+ *
+ * CONFLICT RESOLUTION (confirmed directly) distinguishes two cases the
+ * unique index alone cannot tell apart:
+ *   - Same key, same payload  -> a genuine replay. Returns the ORIGINAL
+ *     order with created:false. Nothing is written; no second order, no
+ *     second payment.
+ *   - Same key, DIFFERENT payload -> a reused key, i.e. a real client bug.
+ *     Rejected 409 rather than silently returning an order that doesn't
+ *     match what was sent, which would leave a real sale silently unsynced.
+ *
+ * PAYMENT SCOPE: cash, and card ONLY for companies on their own terminal
+ * ('own' card_payment_mode). A 'platform' card sale is rejected 400,
+ * because it could not have happened offline in the first place - our
+ * provider has to be reached live to authorise a card, so there is no
+ * legitimate way for a queued 'platform' card sale to exist. Accepting one
+ * would mean recording money as taken that nothing ever charged. 'own' mode
+ * is genuinely offline-capable: the money was taken on the shop's own
+ * terminal, out of band, exactly as it is in the online path, so no
+ * provider is called and provider_reference stays null - identical to how
+ * recordPayment already treats that mode.
+ *
+ * INVENTORY is deliberately NOT touched, exactly as in 9.5 - 10.3 owns the
+ * deduction trigger, so a synced sale moves stock on the same KDS event any
+ * other sale does, not here.
+ *
+ * KNOWN LIMITATION, deliberately accepted and the same shape as 9.5's and
+ * 9.6's: the header insert, the item writes and the payment write are
+ * separate statements, not one transaction (this project has no transaction
+ * wrapper anywhere, and 9.7 does not introduce one). Two genuinely
+ * simultaneous syncs of the same clientOrderId cannot produce two orders -
+ * the unique index prevents that outright, which is the important
+ * guarantee - but the loser of that race could read the winner's order back
+ * in the brief instant before its items are written, and so return an
+ * order whose items array is still filling in. A retry returns it complete.
+ */
+export async function syncOfflineOrder(actor, shopId, data) {
+  await requireAccessTill(actor, shopId);
+
+  // EVERYTHING is validated before a single row is written - same
+  // discipline as createOrder, and it matters more here: a rejection after
+  // the header landed would burn this clientOrderId forever, since the
+  // unique index would then treat every honest retry as a duplicate of a
+  // half-written order.
+  const resolvedMenu = await shopMenuService.getResolvedMenu(actor, shopId);
+  const resolvedLines = data.items.map((line) => resolveOfflineOrderLine(resolvedMenu, line));
+
+  if (data.payment.method === 'card') {
+    const company = await companyRepository.findCompanyByShopId(shopId);
+    if (usesPlatformCardProcessing(company)) {
+      throw new AppError(
+        'Card payments processed by the platform cannot be taken offline - only cash, or card on your own terminal',
+        400
+      );
+    }
+  }
+
+  // The total, and the payment settled against it, are both computed BEFORE
+  // the first write - deliberately, and this ordering is load-bearing. An
+  // over-total card amount rejected AFTER the header had already been
+  // inserted would leave an order with no payment behind AND permanently
+  // burn this clientOrderId: the unique index would then match every honest
+  // retry against that half-written row, so the till could never
+  // successfully sync the sale.
+  //
+  // The invariant to preserve when editing this function: every throw must
+  // sit ABOVE the createSyncedOrder call below. Nothing after the first
+  // write may reject. A test proves this rather than trusting the comment -
+  // it asserts that a rejected over-total card sync leaves zero orders
+  // behind AND that retrying the same clientOrderId then succeeds; moving
+  // this validation below the insert makes it fail.
+  const total = computeResolvedLinesTotal(resolvedLines);
+
+  // Cash may be over-tendered and only what is owed is credited, with the
+  // difference derived back as change - the same rule the live till applies
+  // in recordPayment. Card (necessarily 'own' mode by the check above) has
+  // nothing to give change from, so an amount over the total is rejected.
+  //
+  // Written out here rather than shared with recordPayment deliberately:
+  // that function is previously-approved and covered by 36 money tests, and
+  // the overlap is three lines of arithmetic. Same judgement 8.4 made in
+  // writing its own todayUtcDateString rather than refactoring 8.2's
+  // calculateExpiresOn - a little duplication is the safer trade against
+  // touching tested money-handling code for a small saving.
+  let amountToCredit;
+  let amountTendered = null;
+
+  if (data.payment.method === 'cash') {
+    amountTendered = roundMoney(data.payment.amountTendered);
+    amountToCredit = Math.min(amountTendered, total);
+  } else {
+    amountToCredit = roundMoney(data.payment.amount);
+    if (amountToCredit > total) {
+      throw new AppError(
+        `Payment amount cannot exceed the order total (${total.toFixed(2)})`,
+        400
+      );
+    }
+  }
+
+  amountToCredit = roundMoney(amountToCredit);
+
+  const syncPayloadHash = hashSyncPayload(shopId, data);
+
+  const order = await orderRepository.createSyncedOrder(shopId, {
+    type: data.type,
+    tableNumber: data.tableNumber,
+    customerName: data.customerName,
+    createdByActorType: actor.type,
+    createdByActorId: actor.id,
+    clientOrderId: data.clientOrderId,
+    occurredAt: data.occurredAt,
+    syncPayloadHash,
+  });
+
+  // No row came back: this clientOrderId is already synced for this shop.
+  if (!order) {
+    const existing = await orderRepository.findOrderByClientOrderId(shopId, data.clientOrderId);
+    // Defensive: the row must exist, since only the unique index could have
+    // suppressed the insert. Treated as a 409 rather than crashing on a
+    // null, because the one thing we must never do here is fall through and
+    // write a second order.
+    if (!existing) {
+      throw new AppError('This order could not be synced - please retry', 409);
+    }
+    if (existing.sync_payload_hash !== syncPayloadHash) {
+      throw new AppError(
+        'This clientOrderId has already been used for a different order',
+        409
+      );
+    }
+    return { order: await fetchOrderDetail(shopId, existing.id), created: false };
+  }
+
+  await writeResolvedItems(order.id, resolvedLines);
+
+  await orderRepository.createOrderPayment(order.id, {
+    method: data.payment.method,
+    amount: amountToCredit,
+    amountTendered,
+    // Always null: cash never has one, and a card payment that reaches here
+    // was taken on the shop's OWN terminal, so our provider never saw it.
+    // 9.6's refund path keys off exactly this being null to know not to
+    // call the provider to reverse a charge it never made.
+    providerReference: null,
+    actorType: actor.type,
+    actorId: actor.id,
+  });
+
+  const nextStatus = amountToCredit >= total ? 'paid' : 'partially_paid';
+  await orderRepository.setOrderStatus(order.id, nextStatus);
+
+  return { order: await fetchOrderDetail(shopId, order.id), created: true };
 }

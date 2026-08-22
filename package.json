@@ -29,6 +29,7 @@
     "pino-http": "^11.0.0",
     "resend": "^6.18.0",
     "stripe": "^22.3.2",
+    "ws": "^8.21.3",
     "zod": "^4.4.3"
   },
   "devDependencies": {

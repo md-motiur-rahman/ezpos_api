@@ -7,6 +7,7 @@ import * as orderRepository from './order.repository.js';
 import * as shopRepository from '../shop/shop.repository.js';
 import * as companyRepository from '../company/company.repository.js';
 import * as paymentProvider from './paymentProvider.js';
+import { broadcastOrderEvent, KDS_EVENTS } from '../kds/kdsSocket.js';
 import { PAYABLE_ORDER_STATUSES, REFUNDABLE_ORDER_STATUSES } from './orderConstants.js';
 
 /**
@@ -590,7 +591,14 @@ export async function createOrder(actor, shopId, data) {
 
   await writeResolvedItems(order.id, resolvedLines);
 
-  return fetchOrderDetail(shopId, order.id);
+  const detail = await fetchOrderDetail(shopId, order.id);
+  // 10.1 - push to any connected KDS. Deliberately the LAST thing this
+  // function does, after every write has already committed and the response
+  // is fully built: broadcastOrderEvent never throws and never awaits, so a
+  // notification problem cannot turn a successfully recorded order into an
+  // error for the till. See kdsSocket.js for why that is best-effort.
+  broadcastOrderEvent(shopId, KDS_EVENTS.ORDER_CREATED, detail);
+  return detail;
 }
 
 export async function listOrders(actor, shopId) {
@@ -626,7 +634,12 @@ export async function addItemsToOrder(actor, shopId, orderId, data) {
 
   await writeResolvedItems(order.id, resolvedLines);
 
-  return fetchOrderDetail(shopId, order.id);
+  const detail = await fetchOrderDetail(shopId, order.id);
+  // 10.1 - new work has arrived for an order the kitchen may already be
+  // preparing, so the KDS needs the whole updated order, not just the added
+  // lines (it re-renders one ticket from one payload).
+  broadcastOrderEvent(shopId, KDS_EVENTS.ORDER_ITEMS_ADDED, detail);
+  return detail;
 }
 
 /** A fixed discount can't exceed the amount it's being applied against - a percentage is already capped at 100 by the validation schema, so can never do this on its own. */
@@ -747,7 +760,12 @@ export async function cancelOrder(actor, shopId, orderId, data) {
     actorId: actor.id,
   });
 
-  return fetchOrderDetail(shopId, order.id);
+  const detail = await fetchOrderDetail(shopId, order.id);
+  // 10.1 - the kitchen must be told to STOP preparing this. The single
+  // added line below is 10.1's only touch to 9.4's code: every guard,
+  // every write and the returned value above are untouched.
+  broadcastOrderEvent(shopId, KDS_EVENTS.ORDER_CANCELLED, detail);
+  return detail;
 }
 
 /**
@@ -786,7 +804,12 @@ export async function voidOrderItem(actor, shopId, orderId, orderItemId, data) {
     actorId: actor.id,
   });
 
-  return fetchOrderDetail(shopId, order.id);
+  const detail = await fetchOrderDetail(shopId, order.id);
+  // 10.1 - one line came off a ticket the kitchen may already be working.
+  // The whole order is sent (not just the voided line) so the KDS re-renders
+  // one ticket from one payload, same as ORDER_ITEMS_ADDED above.
+  broadcastOrderEvent(shopId, KDS_EVENTS.ORDER_ITEM_VOIDED, detail);
+  return detail;
 }
 
 /**

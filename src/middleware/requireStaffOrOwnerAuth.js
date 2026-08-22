@@ -1,8 +1,5 @@
-import crypto from 'node:crypto';
-import { verifyAccessToken } from '../utils/jwt.js';
 import { AppError } from '../utils/AppError.js';
-import * as staffAuthRepository from '../modules/staffAuth/staffAuth.repository.js';
-import { isSessionExpired } from '../modules/staffAuth/staffSession.access.js';
+import { resolveActorFromToken, bearerTokenFrom } from '../modules/staffAuth/actorFromToken.js';
 
 /**
  * Accepts EITHER an owner JWT (Module 1.2) OR a staff session token
@@ -18,40 +15,31 @@ import { isSessionExpired } from '../modules/staffAuth/staffSession.access.js';
  * genuinely new endpoints rather than widening what staff sessions can do
  * elsewhere.
  *
- * Tries the (cheap, local, no DB call) JWT check first; only falls through
- * to a staff-session DB lookup if that fails.
+ * The actual token-to-actor logic moved to staffAuth/actorFromToken.js in
+ * 10.1, when the KDS WebSocket handshake became a second caller that cannot
+ * run Express middleware at all (a WebSocket upgrade never reaches Express).
+ * This function is now a thin wrapper over that shared resolver and is
+ * behaviourally IDENTICAL to before: the same "try the cheap local JWT
+ * first, fall through to a staff-session DB lookup" order, the same 401 on
+ * any authentication failure, and the same next(err) - i.e. a 500 - if the
+ * database itself fails, which is why the resolver returns null for an auth
+ * failure but still THROWS for an infrastructure one.
  */
 export async function requireStaffOrOwnerAuth(req, res, next) {
-  const header = req.headers.authorization ?? '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  const token = bearerTokenFrom(req.headers.authorization);
 
   if (!token) {
     return next(new AppError('Authentication required', 401));
   }
 
   try {
-    const payload = verifyAccessToken(token);
-    req.actor = { type: 'owner', id: payload.sub, email: payload.email };
-    return next();
-  } catch {
-    // Not a valid owner JWT - fall through to a staff session check.
-  }
+    const actor = await resolveActorFromToken(token);
 
-  try {
-    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-    const session = await staffAuthRepository.findValidSessionContext(tokenHash);
-
-    if (!session || isSessionExpired(session)) {
+    if (!actor) {
       return next(new AppError('Authentication required', 401));
     }
 
-    await staffAuthRepository.updateLastActive(session.id);
-    req.actor = {
-      type: 'staff',
-      id: session.staff_id,
-      role: session.role,
-      shopId: session.shop_id,
-    };
+    req.actor = actor;
     next();
   } catch (err) {
     next(err);

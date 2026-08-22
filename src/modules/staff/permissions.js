@@ -32,6 +32,13 @@ export const PERMISSIONS = Object.freeze({
   // 9.3 - separate from ACCESS_TILL on purpose: not every till user should
   // be able to discount an order, confirmed directly.
   APPLY_DISCOUNT: 'apply_discount',
+  // 10.1 - watching the kitchen display. Deliberately NOT reusing
+  // ACCESS_TILL: the Chef is exactly who needs the KDS and is the one role
+  // that has never had till access (see ROLE_DEFAULT_PERMISSIONS below), so
+  // gating the kitchen screen on the till permission would lock out its
+  // primary user. It is the mirror image of the front-of-house/kitchen split
+  // ACCESS_TILL already draws, not a duplicate of it.
+  VIEW_KDS: 'view_kds',
 });
 
 /**
@@ -74,6 +81,8 @@ export const ROLE_DEFAULT_PERMISSIONS = Object.freeze({
     PERMISSIONS.MANAGE_ROTA,
     PERMISSIONS.MANAGE_MENU,
     PERMISSIONS.APPLY_DISCOUNT,
+    // 10.1 - a Manager runs the floor and needs to see the kitchen queue.
+    PERMISSIONS.VIEW_KDS,
   ]),
 
   // Manager-level abilities (including manage_rota and manage_menu) are
@@ -86,6 +95,10 @@ export const ROLE_DEFAULT_PERMISSIONS = Object.freeze({
     PERMISSIONS.ACCESS_TILL,
     PERMISSIONS.PERFORM_HEALTH_SAFETY,
     PERMISSIONS.APPLY_DISCOUNT,
+    // 10.1 - same reasoning as APPLY_DISCOUNT above: a Shift Manager is
+    // running the floor in the moment and needs the kitchen queue without
+    // waiting for a manual grant every shop would otherwise have to set up.
+    PERMISSIONS.VIEW_KDS,
   ]),
 
   [ROLES.SERVER]: Object.freeze([PERMISSIONS.ACCESS_TILL, PERMISSIONS.PERFORM_HEALTH_SAFETY]),
@@ -96,6 +109,10 @@ export const ROLE_DEFAULT_PERMISSIONS = Object.freeze({
     PERMISSIONS.VIEW_INVENTORY,
     PERMISSIONS.REQUEST_STOCK_ORDER,
     PERMISSIONS.PERFORM_HEALTH_SAFETY,
+    // 10.1 - the KDS's primary user. The Chef has no till access and never
+    // has, which is exactly why VIEW_KDS is its own permission rather than
+    // part of ACCESS_TILL.
+    PERMISSIONS.VIEW_KDS,
   ]),
 });
 

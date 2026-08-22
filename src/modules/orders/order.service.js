@@ -4,6 +4,7 @@ import { PERMISSIONS } from '../staff/permissions.js';
 import { resolveActorAuthority, assertHasPermission } from '../staff/actorAuthority.js';
 import * as shopMenuService from '../menu/shopMenu.service.js';
 import * as orderRepository from './order.repository.js';
+import * as shopRepository from '../shop/shop.repository.js';
 import * as companyRepository from '../company/company.repository.js';
 import * as paymentProvider from './paymentProvider.js';
 import { PAYABLE_ORDER_STATUSES, REFUNDABLE_ORDER_STATUSES } from './orderConstants.js';
@@ -23,6 +24,36 @@ function toMoney(value) {
 /** Money is always settled to 2dp - kills IEEE-754 noise (0.1 + 0.2 = 0.30000000000000004) before it reaches a response or the DB. */
 function roundMoney(value) {
   return Number(value.toFixed(2));
+}
+
+/**
+ * The VAT rate to SNAPSHOT onto a brand-new order (9.8) - called once, at
+ * creation time only (createOrder, and 9.7's syncOfflineOrder), never at
+ * read time. See orders.vat_rate's migration comment for why this is a
+ * snapshot rather than a live lookup: a sale's VAT rate is a historical/
+ * compliance fact about that sale, not something that should silently
+ * change if the shop's settings change later.
+ *
+ * Always returns a definite number for a shop that exists - never null -
+ * because every NEW order gets an explicit rate recorded, even 0. Two
+ * cases collapse to 0, deliberately, per the confirmed design: a shop
+ * that isn't VAT-registered charges no VAT regardless of any leftover
+ * `default_vat_rate` value; a shop that IS registered but has never
+ * configured a rate is treated as 0% rather than blocking order creation
+ * over the OWNER's own misconfiguration (till staff have no way to fix
+ * that mid-sale). This does not touch shop.validation.js - the ambiguous
+ * state (registered, no rate) is still allowed to exist there, exactly as
+ * it does today.
+ *
+ * `shop` is allowed to be null/undefined defensively, same style as
+ * usesPlatformCardProcessing's fallback below - in practice requireAccessTill
+ * having already succeeded means the shop necessarily exists.
+ */
+function resolveVatRate(shop) {
+  if (!shop?.vat_registered) {
+    return 0;
+  }
+  return toMoney(shop.default_vat_rate);
 }
 
 /**
@@ -236,6 +267,38 @@ function toPaymentResponse(row, refunds = []) {
   };
 }
 
+/**
+ * Decomposes an already-rounded `total` into its VAT components (9.8),
+ * using the rate SNAPSHOTTED on the order at creation time
+ * (order.vat_rate) - never a live lookup of the shop's current settings,
+ * see orders.vat_rate's migration comment.
+ *
+ * `total` is treated as VAT-INCLUSIVE (confirmed directly): the amount the
+ * customer is charged does not change - this only decomposes it into
+ * vatExclusiveAmount + vatAmount for reporting/receipt purposes.
+ *
+ * vatAmount is deliberately the REMAINDER (total - vatExclusiveAmount), not
+ * an independently-computed `total * rate / 100` - so the two always
+ * reconcile to `total` EXACTLY, by construction, never by coincidence
+ * (same "one definition of a total" discipline as 9.5's amountPaid / 9.6's
+ * sumRefundAmounts). Division-by-zero is not possible: the denominator is
+ * `1 + vatRate/100`, which is 1 at the lowest (0%), never 0.
+ *
+ * order.vat_rate is NULL for any order created before 9.8 shipped - an
+ * honest "VAT was never calculated for this historical order" rather than
+ * a fabricated 0%, so all three fields come back null together in that
+ * case rather than silently reporting no VAT.
+ */
+function toVatResponse(order, total) {
+  if (order.vat_rate === null) {
+    return { vatRate: null, vatExclusiveAmount: null, vatAmount: null };
+  }
+  const vatRate = toMoney(order.vat_rate);
+  const vatExclusiveAmount = roundMoney(total / (1 + vatRate / 100));
+  const vatAmount = roundMoney(total - vatExclusiveAmount);
+  return { vatRate, vatExclusiveAmount, vatAmount };
+}
+
 function toDetailResponse(order, items, payments = []) {
   // Voided items (9.4) are kept in the response for audit but excluded from
   // every total below - they're no longer being charged. 9.1/9.2/9.3 never
@@ -255,6 +318,11 @@ function toDetailResponse(order, items, payments = []) {
   // valid-at-the-time order discount are applied at different moments and
   // would otherwise compound into a negative number.
   const total = Math.max(0, subtotalAfterItemDiscounts - discountAmount);
+  // The single rounded value used for BOTH the `total` field below and the
+  // VAT decomposition (9.8) - so the two can never disagree by a penny of
+  // floating-point noise from being rounded independently in two places.
+  const roundedTotal = Number(total.toFixed(2));
+  const vat = toVatResponse(order, roundedTotal);
   // 9.5 - summed from the payment rows themselves rather than a SQL
   // SUM(), so there's exactly one definition of "amount paid" and no risk
   // of the aggregate and the itemized list disagreeing. (A SQL SUM() over
@@ -280,19 +348,34 @@ function toDetailResponse(order, items, payments = []) {
     // Full list, including any voided lines (audit trail) - only the
     // totals below exclude them.
     items,
-    // Pre-tax, pre-discount, active-items-only - deliberately unchanged in
-    // meaning. VAT (9.8) is still a separate, not-yet-built submodule; this
-    // is not a final total. Cancelling the whole order does NOT zero this
-    // out - `status`/`cancellation` are the authoritative "not charged"
-    // signal, this stays a record of what the order contained. Refunding
-    // (9.6) likewise does not alter it: what was ordered is unchanged by
-    // money coming back out.
+    // Pre-discount, active-items-only - deliberately unchanged in meaning.
+    // Still VAT-INCLUSIVE (9.8 decomposes `total` into net+VAT below, it
+    // never adds to it - see `vatAmount`). Cancelling the whole order does
+    // NOT zero this out - `status`/`cancellation` are the authoritative
+    // "not charged" signal, this stays a record of what the order
+    // contained. Refunding (9.6) likewise does not alter it: what was
+    // ordered is unchanged by money coming back out.
     subtotal: Number(subtotal.toFixed(2)),
     // New in 9.3 - all zero/null for an order with no discounts anywhere.
     itemDiscountTotal: Number(itemDiscountTotal.toFixed(2)),
     discount,
     discountAmount,
-    total: Number(total.toFixed(2)),
+    total: roundedTotal,
+    // New in 9.8 - null/null/null for any order created before 9.8 shipped
+    // (order.vat_rate was never snapshotted for it); 0/total/0 for an order
+    // from a non-VAT-registered shop. `total` above is UNCHANGED by this -
+    // it was always "pre-VAT-decomposition", never "VAT-free" (see the 9.1
+    // comment this replaces) - vatAmount/vatExclusiveAmount merely decompose
+    // it, they never add to what the customer is charged.
+    //
+    // Named `vatExclusiveAmount`, NOT `netAmount` - 9.6 already uses
+    // `netAmount` inside each payment object to mean "still refundable
+    // against this payment" (net of REFUNDS). Reusing the word here for
+    // "net of VAT" would make the same field name mean two different
+    // things at two nesting levels of the same response.
+    vatRate: vat.vatRate,
+    vatExclusiveAmount: vat.vatExclusiveAmount,
+    vatAmount: vat.vatAmount,
     // New in 9.4 - null unless this order has been cancelled.
     cancellation: toCancellationResponse(order),
     // New in 9.5 - empty/0/full-total for an order with no payments, so
@@ -491,12 +574,18 @@ export async function createOrder(actor, shopId, data) {
   const resolvedMenu = await shopMenuService.getResolvedMenu(actor, shopId);
   const resolvedLines = data.items.map((line) => resolveOrderLine(resolvedMenu, line));
 
+  // 9.8 - the VAT rate is SNAPSHOTTED here, once, at creation time - see
+  // resolveVatRate and orders.vat_rate's migration comment for why this is
+  // never re-derived later from the shop's current settings.
+  const shop = await shopRepository.findActiveShopById(shopId);
+
   const order = await orderRepository.createOrder(shopId, {
     type: data.type,
     tableNumber: data.tableNumber,
     customerName: data.customerName,
     createdByActorType: actor.type,
     createdByActorId: actor.id,
+    vatRate: resolveVatRate(shop),
   });
 
   await writeResolvedItems(order.id, resolvedLines);
@@ -1153,6 +1242,19 @@ export async function syncOfflineOrder(actor, shopId, data) {
   const resolvedMenu = await shopMenuService.getResolvedMenu(actor, shopId);
   const resolvedLines = data.items.map((line) => resolveOfflineOrderLine(resolvedMenu, line));
 
+  // 9.8 - fetched unconditionally (not just for card payments, unlike the
+  // company lookup below): the VAT rate is snapshotted on every synced
+  // order regardless of payment method. A read, not a write, so it's safe
+  // here alongside the rest of this function's pre-write validation.
+  //
+  // KNOWN LIMITATION, same shape as 9.7's own: this reads the shop's
+  // CURRENT vat_registered/default_vat_rate at SYNC time, not at the time
+  // the sale actually happened (occurredAt) - there is no history of a
+  // shop's past VAT settings to recover the rate that truly applied then.
+  // Accepted for the same reason 9.7 accepts not knowing a soft-deleted
+  // menu item's old state: no versioned settings table exists to do better.
+  const shop = await shopRepository.findActiveShopById(shopId);
+
   if (data.payment.method === 'card') {
     const company = await companyRepository.findCompanyByShopId(shopId);
     if (usesPlatformCardProcessing(company)) {
@@ -1219,6 +1321,7 @@ export async function syncOfflineOrder(actor, shopId, data) {
     clientOrderId: data.clientOrderId,
     occurredAt: data.occurredAt,
     syncPayloadHash,
+    vatRate: resolveVatRate(shop),
   });
 
   // No row came back: this clientOrderId is already synced for this shop.

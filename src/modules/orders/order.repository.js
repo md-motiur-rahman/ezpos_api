@@ -7,7 +7,8 @@ const ORDER_COLUMNS = `id, shop_id, type, table_number, customer_name, status,
                        discounted_by_actor_type, discounted_by_actor_id, discounted_at,
                        cancelled_at, cancelled_by_actor_type, cancelled_by_actor_id,
                        cancellation_reason, was_prepped,
-                       client_order_id, occurred_at, sync_payload_hash`;
+                       client_order_id, occurred_at, sync_payload_hash,
+                       vat_rate`;
 
 const ORDER_ITEM_DISCOUNT_COLUMNS = `discount_type, discount_value, discount_reason,
                        discounted_by_actor_type, discounted_by_actor_id, discounted_at`;
@@ -17,14 +18,23 @@ const ORDER_ITEM_VOID_COLUMNS = `voided_at, voided_by_actor_type, voided_by_acto
 
 export async function createOrder(
   shopId,
-  { type, tableNumber, customerName, createdByActorType, createdByActorId }
+  { type, tableNumber, customerName, createdByActorType, createdByActorId, vatRate }
 ) {
   const { rows } = await query(
     `INSERT INTO orders
-       (shop_id, type, table_number, customer_name, created_by_actor_type, created_by_actor_id)
-     VALUES ($1, $2, $3, $4, $5, $6)
+       (shop_id, type, table_number, customer_name, created_by_actor_type, created_by_actor_id,
+        vat_rate)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING ${ORDER_COLUMNS}`,
-    [shopId, type, tableNumber ?? null, customerName ?? null, createdByActorType, createdByActorId]
+    [
+      shopId,
+      type,
+      tableNumber ?? null,
+      customerName ?? null,
+      createdByActorType,
+      createdByActorId,
+      vatRate,
+    ]
   );
   return rows[0];
 }
@@ -400,13 +410,14 @@ export async function createSyncedOrder(
     clientOrderId,
     occurredAt,
     syncPayloadHash,
+    vatRate,
   }
 ) {
   const { rows } = await query(
     `INSERT INTO orders
        (shop_id, type, table_number, customer_name, created_by_actor_type, created_by_actor_id,
-        client_order_id, occurred_at, sync_payload_hash)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        client_order_id, occurred_at, sync_payload_hash, vat_rate)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      ON CONFLICT (shop_id, client_order_id) WHERE client_order_id IS NOT NULL
      DO NOTHING
      RETURNING ${ORDER_COLUMNS}`,
@@ -420,6 +431,7 @@ export async function createSyncedOrder(
       clientOrderId,
       occurredAt,
       syncPayloadHash,
+      vatRate,
     ]
   );
   return rows[0] ?? null;

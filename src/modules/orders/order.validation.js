@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ORDER_TYPES, DISCOUNT_TYPES, PAYMENT_METHODS } from './orderConstants.js';
+import { ORDER_TYPES, DISCOUNT_TYPES, PAYMENT_METHODS, ORDER_ITEM_STATUSES } from './orderConstants.js';
 
 const orderItemSchema = z
   .object({
@@ -136,6 +136,19 @@ export const paymentIdParamSchema = orderIdParamSchema.extend({
 export const refundInputSchema = z.object({
   amount: z.number().positive('amount must be greater than 0'),
   reason: z.string().trim().min(1, 'reason cannot be empty').optional(),
+});
+
+// --- Item status flow (10.2) ---
+
+// Deliberately just an enum, no "clear" case like discountInputSchema -
+// unlike a discount, a status is never absent: it is always exactly one of
+// ORDER_ITEM_STATUSES from the moment an item is created (default
+// 'pending'), so there is nothing to null out. Transitions are UNRESTRICTED
+// at this layer (confirmed directly) - any value may be set at any time,
+// forward or backward; the service layer only blocks it on a
+// cancelled order or an already-voided item, never on the FROM/TO pair.
+export const orderItemStatusInputSchema = z.object({
+  status: z.enum(ORDER_ITEM_STATUSES),
 });
 
 // --- Offline sync (9.7) ---

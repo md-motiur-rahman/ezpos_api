@@ -90,6 +90,23 @@ async function requireApplyDiscount(actor, shopId) {
   return authority;
 }
 
+/**
+ * Gate for 10.2's item-status endpoint - reuses VIEW_KDS (10.1) rather than
+ * introducing a new permission (confirmed directly). Same precedent as
+ * 7.7's wastage logging, where reading and logging share ONE gate rather
+ * than being split into view/manage: the Chef is the one role built to both
+ * watch the kitchen screen and update what's on it, on the same device.
+ */
+async function requireViewKds(actor, shopId) {
+  const authority = await resolveActorAuthority(actor, shopId);
+  assertHasPermission(
+    authority,
+    PERMISSIONS.VIEW_KDS,
+    'You do not have permission to view the kitchen display'
+  );
+  return authority;
+}
+
 function toListResponse(order) {
   return {
     id: order.id,
@@ -206,6 +223,17 @@ function toItemResponse(row, modifiers) {
     total: Number((lineTotal - discountAmount).toFixed(2)),
     // New in 9.4 - null unless this line has been voided.
     void: toVoidResponse(row),
+    // New in 10.2 - `status` is a flat string, same shape as `order.status`
+    // itself (which also has no per-change actor tracking of its own; 9.4/
+    // 9.5/9.6 each carry their OWN dedicated actor columns for their own
+    // specific transitions instead). Every item has a status from the
+    // moment it's created ('pending', the column default), so unlike
+    // `discount`/`void` this is never null - only the audit fields below
+    // are, until the first explicit PATCH.
+    status: row.status,
+    statusUpdatedAt: row.status_updated_at ?? null,
+    statusUpdatedByActorType: row.status_updated_by_actor_type ?? null,
+    statusUpdatedByActorId: row.status_updated_by_actor_id ?? null,
     createdAt: row.created_at,
   };
 }
@@ -809,6 +837,55 @@ export async function voidOrderItem(actor, shopId, orderId, orderItemId, data) {
   // The whole order is sent (not just the voided line) so the KDS re-renders
   // one ticket from one payload, same as ORDER_ITEMS_ADDED above.
   broadcastOrderEvent(shopId, KDS_EVENTS.ORDER_ITEM_VOIDED, detail);
+  return detail;
+}
+
+/**
+ * Sets one line item's kitchen prep status (10.2). Gated on VIEW_KDS, not
+ * ACCESS_TILL - this is a kitchen action, and the Chef (this permission's
+ * primary holder) has no till access at all.
+ *
+ * Deliberately NOT gated on `order.status === 'open'` the way 9.2/9.3's
+ * writes are (requireOpenOrder is NOT reused here) - a till taking payment
+ * does not stop the kitchen from cooking, so an order moving to
+ * 'partially_paid'/'paid' must not block its own prep status from
+ * advancing. Only a CANCELLED order blocks it: nothing should still be "in
+ * progress" once the whole order has been called off.
+ *
+ * Transitions are UNRESTRICTED (confirmed directly, see orderConstants.js) -
+ * any ORDER_ITEM_STATUSES value is accepted regardless of the item's
+ * current one. A voided item's status can no longer be changed, mirroring
+ * 9.4's own guard on setOrderItemDiscount for the identical reason: a
+ * voided line is no longer part of what the kitchen is making.
+ */
+export async function setOrderItemStatus(actor, shopId, orderId, orderItemId, data) {
+  await requireViewKds(actor, shopId);
+  const order = await getOrderOrThrow(shopId, orderId);
+
+  if (order.status === 'cancelled') {
+    throw new AppError('Cannot update item status on a cancelled order', 400);
+  }
+
+  const item = await orderRepository.findOrderItemForOrder(orderItemId, order.id);
+  if (!item) {
+    throw new AppError('Order item not found', 404);
+  }
+  if (item.voided_at) {
+    throw new AppError('Cannot update the status of a voided item', 400);
+  }
+
+  await orderRepository.setOrderItemStatus(item.id, {
+    status: data.status,
+    actorType: actor.type,
+    actorId: actor.id,
+  });
+
+  const detail = await fetchOrderDetail(shopId, order.id);
+  // 10.2 - reports the kitchen's own progress back out, so every other
+  // connected KDS screen for this shop (an expo screen, a second station)
+  // stays in sync. Same best-effort broadcastOrderEvent as 10.1's four
+  // events - never throws, never blocks this function's own success.
+  broadcastOrderEvent(shopId, KDS_EVENTS.ITEM_STATUS_CHANGED, detail);
   return detail;
 }
 

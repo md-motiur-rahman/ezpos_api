@@ -42,8 +42,12 @@ const KDS_PATH_PATTERN =
  * convention as ORDER_TYPES/WASTAGE_REASONS/ALLERGENS - a small, fixed,
  * rarely-changing set validated in code rather than a DB enum.
  *
- * 10.2 (item status flow) will add its own values here; the four below are
- * exactly the events that change what the kitchen should be working on.
+ * The first four are exactly the events that change what the kitchen should
+ * be working on (10.1). ITEM_STATUS_CHANGED (10.2) is different in kind: it
+ * reports the KITCHEN'S OWN progress back out, so every other connected KDS
+ * screen for the same shop (an expo screen, a second prep station) stays in
+ * sync - reusing the identical best-effort broadcastOrderEvent mechanism
+ * 10.1 already proved correct for isolation, not a new channel.
  */
 export const KDS_EVENTS = Object.freeze({
   CONNECTED: 'kds.connected',
@@ -51,6 +55,7 @@ export const KDS_EVENTS = Object.freeze({
   ORDER_ITEMS_ADDED: 'order.items_added',
   ORDER_CANCELLED: 'order.cancelled',
   ORDER_ITEM_VOIDED: 'order.item_voided',
+  ITEM_STATUS_CHANGED: 'order.item_status_changed',
 });
 
 const HEARTBEAT_INTERVAL_MS = 30_000;

@@ -130,6 +130,8 @@ export async function listItemsForOrder(orderId) {
             oi.discounted_by_actor_type, oi.discounted_by_actor_id, oi.discounted_at,
             oi.voided_at, oi.voided_by_actor_type, oi.voided_by_actor_id,
             oi.void_reason, oi.was_prepped,
+            oi.status, oi.status_updated_at,
+            oi.status_updated_by_actor_type, oi.status_updated_by_actor_id,
             COALESCE(mi.name, smi.name) AS item_name,
             miv.name AS variant_name
      FROM order_items oi
@@ -242,6 +244,30 @@ export async function voidOrderItem(orderItemId, { reason, wasPrepped, actorType
      WHERE id = $1
      RETURNING id, order_id, quantity, unit_price, ${ORDER_ITEM_DISCOUNT_COLUMNS}, ${ORDER_ITEM_VOID_COLUMNS}`,
     [orderItemId, actorType, actorId, reason ?? null, wasPrepped]
+  );
+  return rows[0];
+}
+
+/**
+ * Sets one line item's kitchen prep status (10.2). Hand-written UPDATE, not
+ * buildUpdateSet, for the same reason setOrderItemDiscount/voidOrderItem
+ * above are: order_items deliberately has NO generic updated_at column
+ * (immutable line once created, per its original 9.1 migration), and
+ * buildUpdateSet unconditionally appends `updated_at = now()`.
+ *
+ * Unconditional write, no "clear" branch to special-case (unlike
+ * setOrderItemDiscount) - a status is never null/absent, only ever one of
+ * ORDER_ITEM_STATUSES, so every call here is a plain overwrite.
+ */
+export async function setOrderItemStatus(orderItemId, { status, actorType, actorId }) {
+  const { rows } = await query(
+    `UPDATE order_items
+     SET status = $2, status_updated_at = now(),
+         status_updated_by_actor_type = $3, status_updated_by_actor_id = $4
+     WHERE id = $1
+     RETURNING id, order_id, quantity, unit_price, ${ORDER_ITEM_DISCOUNT_COLUMNS}, ${ORDER_ITEM_VOID_COLUMNS},
+               status, status_updated_at, status_updated_by_actor_type, status_updated_by_actor_id`,
+    [orderItemId, status, actorType, actorId]
   );
   return rows[0];
 }

@@ -13,6 +13,7 @@ import {
   paymentIdParamSchema,
   refundInputSchema,
   syncOfflineOrderSchema,
+  orderItemStatusInputSchema,
 } from './order.validation.js';
 import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
 
@@ -105,6 +106,19 @@ router.post(
   validateParams(orderItemIdParamSchema),
   validateBody(cancellationInputSchema),
   orderController.voidOrderItem
+);
+
+// --- Item status flow (10.2) ---
+
+// VIEW_KDS-gated, not ACCESS_TILL - this is a kitchen action, and the Chef
+// (this permission's primary holder) has no till access. A PATCH, same verb
+// as 9.3's discount routes: this sets a field to an explicit value rather
+// than performing a one-directional business action the way cancel/void do.
+router.patch(
+  '/:orderId/items/:orderItemId/status',
+  validateParams(orderItemIdParamSchema),
+  validateBody(orderItemStatusInputSchema),
+  orderController.setOrderItemStatus
 );
 
 // --- Payments, cash and card, split/partial (9.5) ---

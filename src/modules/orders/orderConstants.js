@@ -77,3 +77,20 @@ export const REFUNDABLE_ORDER_STATUSES = Object.freeze([
   'paid',
   'partially_refunded',
 ]);
+
+/**
+ * 10.2 - one order_item's kitchen prep status. 'pending' is the default on
+ * creation (confirmed directly, added beyond the roadmap's literal
+ * "in progress -> ready -> served" wording - something has to be true
+ * before the kitchen has started an item). Transitions are UNRESTRICTED:
+ * any value here may be set at any time, forward or backward - unlike
+ * ORDER_STATUSES above, which only ever advances through one-directional
+ * business events (cancel/pay/refund), a prep status is a live operational
+ * field the kitchen routinely needs to correct in the moment, with no
+ * audit/compliance reason to lock it into one direction.
+ *
+ * `order_items.status` is plain `text` with no CHECK constraint (see its
+ * 10.2 migration), so adding a value here needs no schema change - the same
+ * convention as ORDER_TYPES/DISCOUNT_TYPES/PAYMENT_METHODS above.
+ */
+export const ORDER_ITEM_STATUSES = Object.freeze(['pending', 'in_progress', 'ready', 'served']);

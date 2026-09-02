@@ -94,3 +94,29 @@ export const REFUNDABLE_ORDER_STATUSES = Object.freeze([
  * convention as ORDER_TYPES/DISCOUNT_TYPES/PAYMENT_METHODS above.
  */
 export const ORDER_ITEM_STATUSES = Object.freeze(['pending', 'in_progress', 'ready', 'served']);
+
+/**
+ * 10.3 - the item statuses that TRIGGER an inventory deduction (7.9's
+ * engine). Reaching any of these means the kitchen has actually made the
+ * item, so the ingredients have physically been consumed.
+ *
+ * 'ready' is the trigger point (confirmed directly): the moment the kitchen
+ * declares the item made. 'served' is included as a BACKSTOP, not as a
+ * second trigger - 10.2 deliberately allows unrestricted transitions and has
+ * its own test for a direct 'pending' -> 'served' jump, so a real sale could
+ * otherwise skip straight past 'ready' and never deduct anything, which
+ * would be a silent under-deduction in a flow 10.2 explicitly supports.
+ * Anything at or past "the kitchen made this" deducts.
+ *
+ * Listing two statuses here is safe ONLY because the deduction is claimed
+ * atomically via order_items.inventory_deducted_at (see its 10.3 migration):
+ * an item that passes through 'ready' and then 'served' deducts exactly
+ * once, as does one that jumps straight to 'served', as does one that is
+ * corrected back to 'in_progress' and set to 'ready' again. The status may
+ * be re-entered any number of times; stock moves once, ever.
+ *
+ * 'pending'/'in_progress' deliberately do NOT deduct - prep can be abandoned
+ * or the line voided mid-cook, and there is no reversal mechanism (this
+ * project's consistent philosophy, see 8.4/9.4).
+ */
+export const INVENTORY_DEDUCTION_STATUSES = Object.freeze(['ready', 'served']);

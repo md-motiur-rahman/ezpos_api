@@ -8,7 +8,13 @@ import * as shopRepository from '../shop/shop.repository.js';
 import * as companyRepository from '../company/company.repository.js';
 import * as paymentProvider from './paymentProvider.js';
 import { broadcastOrderEvent, KDS_EVENTS } from '../kds/kdsSocket.js';
-import { PAYABLE_ORDER_STATUSES, REFUNDABLE_ORDER_STATUSES } from './orderConstants.js';
+import { deductInventoryForSale } from '../inventory/saleDeduction.service.js';
+import { logger } from '../../utils/logger.js';
+import {
+  PAYABLE_ORDER_STATUSES,
+  REFUNDABLE_ORDER_STATUSES,
+  INVENTORY_DEDUCTION_STATUSES,
+} from './orderConstants.js';
 
 /**
  * Every monetary value out of `pg` arrives as a STRING, not a number
@@ -841,6 +847,83 @@ export async function voidOrderItem(actor, shopId, orderId, orderItemId, data) {
 }
 
 /**
+ * Deducts stock for ONE order line that the kitchen has just made (10.3) -
+ * the trigger 7.9's engine was built for and deliberately shipped without
+ * ("nothing user-facing should be able to move stock with no sale behind
+ * it"). This is that sale: an item reaching a deducting status is the KDS
+ * declaring the ingredients physically consumed.
+ *
+ * THE CLAIM COMES FIRST, and the ordering is load-bearing. Claiming
+ * atomically before deducting means two genuinely concurrent callers cannot
+ * both deduct - only the claim winner proceeds (see
+ * claimOrderItemForDeduction, verified empirically). Reading a flag and
+ * then writing it after the deduction would let both callers read NULL and
+ * both deduct, silently halving the stock twice over - which is the exact
+ * failure this whole mechanism exists to prevent.
+ *
+ * NOT best-effort, deliberately UNLIKE broadcastOrderEvent above. A KDS
+ * push is a notification and must never fail a recorded order; a stock
+ * movement is real business data, so a genuine database failure here
+ * surfaces as a 500 rather than being swallowed. Note this can only ever be
+ * an INFRASTRUCTURE failure: deductInventoryForSale never throws for a
+ * business reason - an ingredient with no inventory link (or one pointing
+ * at a soft-deleted item) is reported in `skipped` and never blocks the
+ * rest of the sale.
+ *
+ * `skipped` is logged rather than returned to the caller: this route is
+ * VIEW_KDS-gated and ingredient/inventory detail belongs to
+ * VIEW_INVENTORY, the same separation 8.2 made in keeping quantityOnHand
+ * out of the scan response. The response contract is unchanged by 10.3.
+ *
+ * KNOWN LIMITATION, deliberately accepted and flagged rather than hidden,
+ * the same shape as 9.5/9.6/9.7's: the claim and the stock write are
+ * separate statements, not one transaction (this project has no transaction
+ * wrapper anywhere and 10.3 adds none). If the claim commits and the
+ * connection then dies before the stock write, that line is permanently
+ * marked deducted without its stock having moved - a one-off
+ * UNDER-deduction, correctable through 7.1's manual PATCH quantityOnHand.
+ * The claim is deliberately NOT released in that case: releasing it would
+ * trade this narrow, self-announcing failure for the risk of a silent
+ * DOUBLE-deduction whenever a write actually committed but its
+ * acknowledgement was lost, and a compensating write is precisely what this
+ * project avoids without a transaction to make it safe (see 9.5's charge
+ * ordering for the same reasoning).
+ */
+async function deductInventoryForReadyItem(shopId, orderItemId) {
+  const claimed = await orderRepository.claimOrderItemForDeduction(orderItemId);
+  // Already deducted by an earlier transition (or by a concurrent caller
+  // that won the claim) - nothing to do. This is the NORMAL path for an
+  // item going 'ready' then 'served', not an error.
+  if (!claimed) {
+    return;
+  }
+
+  const modifierRows = await orderRepository.listModifiersForOrderItems([claimed.id]);
+
+  // Exactly the shape 7.9's engine already accepts - it is called
+  // completely unchanged, and saleDeduction.service.js was not touched by
+  // this submodule. Base item + variant + modifier recipes sum additively
+  // there; the engine also never blocks on insufficient stock (it goes
+  // negative on purpose, since the food has already been made).
+  const { skipped } = await deductInventoryForSale(shopId, [
+    {
+      menuItemId: claimed.menu_item_id,
+      shopMenuItemId: claimed.shop_menu_item_id,
+      variantId: claimed.variant_id,
+      modifierOptionIds: modifierRows.map((row) => row.modifier_option_id),
+      quantity: claimed.quantity,
+    },
+  ]);
+
+  if (skipped.length > 0) {
+    logger.warn(
+      { shopId, orderItemId: claimed.id, skipped },
+      'Inventory deduction skipped ingredients with no linked stock item'
+    );
+  }
+}
+
+/**
  * Sets one line item's kitchen prep status (10.2). Gated on VIEW_KDS, not
  * ACCESS_TILL - this is a kitchen action, and the Chef (this permission's
  * primary holder) has no till access at all.
@@ -857,6 +940,17 @@ export async function voidOrderItem(actor, shopId, orderId, orderItemId, data) {
  * current one. A voided item's status can no longer be changed, mirroring
  * 9.4's own guard on setOrderItemDiscount for the identical reason: a
  * voided line is no longer part of what the kitchen is making.
+ *
+ * 10.3 adds the INVENTORY DEDUCTION TRIGGER on top, and it is the only
+ * change this submodule makes to the function: reaching a deducting status
+ * moves real stock, exactly once per line ever. Everything above is
+ * untouched - same gate, same guards, same writes, same response.
+ *
+ * The deduction runs AFTER the status write, deliberately: advancing the
+ * prep status is the kitchen's actual request and must not be held hostage
+ * to inventory, and this keeps 10.2's already-approved write in the exact
+ * position it shipped in. The voided-item guard above also means a voided
+ * line can never reach the deduction at all.
  */
 export async function setOrderItemStatus(actor, shopId, orderId, orderItemId, data) {
   await requireViewKds(actor, shopId);
@@ -879,6 +973,14 @@ export async function setOrderItemStatus(actor, shopId, orderId, orderItemId, da
     actorType: actor.type,
     actorId: actor.id,
   });
+
+  // 10.3 - the kitchen has made this item, so its ingredients are gone.
+  // Idempotent by construction: the claim inside can only ever be won once
+  // per line, so re-entering 'ready', or passing through 'ready' and on to
+  // 'served', deducts exactly once. See deductInventoryForReadyItem.
+  if (INVENTORY_DEDUCTION_STATUSES.includes(data.status)) {
+    await deductInventoryForReadyItem(shopId, item.id);
+  }
 
   const detail = await fetchOrderDetail(shopId, order.id);
   // 10.2 - reports the kitchen's own progress back out, so every other

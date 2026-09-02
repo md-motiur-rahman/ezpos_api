@@ -272,6 +272,47 @@ export async function setOrderItemStatus(orderItemId, { status, actorType, actor
   return rows[0];
 }
 
+/**
+ * Atomically claims this line for an inventory deduction (10.3), returning
+ * the row if THIS caller won the claim and null if it had already been
+ * deducted. The caller deducts stock if and only if a row comes back.
+ *
+ * THE `AND inventory_deducted_at IS NULL` IS LOAD-BEARING AND MUST NOT BE
+ * REMOVED - it is the entire idempotency mechanism, not a redundant guard.
+ * 10.2 made item status transitions UNRESTRICTED, so an item can reach a
+ * deducting status (10.3's INVENTORY_DEDUCTION_STATUSES) any number of
+ * times: 'ready' then 'served', a mis-tap corrected back to 'in_progress'
+ * and set to 'ready' again, or two KDS screens in one shop tapping at the
+ * same instant (10.1 supports and tests multiple screens per shop). Stock
+ * may move only ONCE per line.
+ *
+ * Verified empirically against the real database before this was written,
+ * because a silent double-deduction is exactly the class of bug this
+ * project has caught this way before (7.9's unnest() finding):
+ *   - sequential: the first call returns 1 row, the second returns 0, and
+ *     the original timestamp is preserved rather than overwritten.
+ *   - genuinely CONCURRENT (two overlapping transactions): the second
+ *     BLOCKS on the first's row lock, then - under READ COMMITTED -
+ *     re-evaluates the WHERE against the newly committed row, finds
+ *     inventory_deducted_at no longer NULL, and returns 0 rows. Exactly one
+ *     winner, confirmed in both orderings.
+ *   - a rolled-back claim correctly releases, leaving the column NULL.
+ *
+ * Selects the recipe-resolution columns in the same statement, so the
+ * caller needs no second read to build the sale line for 7.9's engine.
+ */
+export async function claimOrderItemForDeduction(orderItemId) {
+  const { rows } = await query(
+    `UPDATE order_items
+     SET inventory_deducted_at = now()
+     WHERE id = $1 AND inventory_deducted_at IS NULL
+     RETURNING id, order_id, menu_item_id, shop_menu_item_id, variant_id, quantity,
+               inventory_deducted_at`,
+    [orderItemId]
+  );
+  return rows[0] ?? null;
+}
+
 const PAYMENT_COLUMNS = `id, order_id, method, amount, amount_tendered, provider_reference,
                        paid_by_actor_type, paid_by_actor_id, created_at`;
 

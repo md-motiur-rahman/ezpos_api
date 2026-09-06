@@ -1,701 +1,883 @@
-# EzPOS API — Complete Endpoint Reference
+# EzPOS API Reference
 
-Generated from the actual route files on branch `master` (Modules 0–10 complete).
-This is the contract the Next.js frontend builds against.
+The contract the Next.js dashboard and the native till/KDS apps build against.
+**Derived from the route, validation and service files on `master`** — Modules 0–10
+complete, **162 REST endpoints + 1 WebSocket**.
+
+This document is organised by *what you are building*, not by backend module number:
+
+| Part | For |
+|---|---|
+| [1. Connecting](#1-connecting) | base URLs, errors, status codes, limits |
+| [2. Authentication](#2-authentication) | the two token systems |
+| [3. Authorization](#3-authorization) | roles, permissions, tenancy |
+| [4. Endpoint index](#4-endpoint-index) | **every endpoint, one row each** |
+| [5. Owner dashboard](#5-owner-dashboard) | company, shops, master menu, staff, rota |
+| [6. Shop floor](#6-shop-floor) | resolved menu, inventory, suppliers, wastage, H&S |
+| [7. Till](#7-till) | orders, discounts, payments, refunds, offline sync |
+| [8. Kitchen display](#8-kitchen-display) | the WebSocket and its narrowed payload |
+| [9. Cross-cutting rules](#9-cross-cutting-rules) | money, dates, nullable fields |
+| [10. Traps](#10-traps) | **read before building anything** |
+| [11. Not built yet](#11-not-built-yet) | do not design around these |
 
 ---
 
-## 0. Global conventions
+## 1. Connecting
 
 **Base URL**
-- Local: `http://localhost:<PORT>`
-- Production: your Render service URL.
-- Every path below is absolute from the base URL.
 
-**Content type:** `application/json` everywhere (the one exception is
-`POST /api/webhooks/stripe`, which Stripe calls, not the frontend).
+| Environment | URL |
+|---|---|
+| Production | `https://pos-api-52vj.onrender.com` |
+| Local | `http://localhost:<PORT>` (`PORT` from your `.env`, 4000 in the sample) |
+
+Every path in this document is absolute from the base URL. Set it once as
+`NEXT_PUBLIC_API_BASE_URL`; never hardcode it at a call site.
+
+> The production host is a Render **free** instance and **spins down after ~15
+> minutes idle**. The first request after a spin-down takes several seconds and a
+> WebSocket will have been dropped. Do not treat that latency as a bug, and give
+> the KDS a reconnect loop.
+
+**Content type:** `application/json` everywhere. The one exception is
+`POST /api/webhooks/stripe`, which Stripe calls with a raw body — not the frontend.
 
 **Error envelope — every non-2xx response, no exceptions:**
+
 ```json
 { "error": { "message": "Human-readable message" } }
 ```
-There is no `code`, no `fields[]`, no `details`. Validation failures come back as a
-single 400 with every issue joined into one string, e.g.
-`"Invalid request body - items.0.quantity: quantity must be greater than 0; type: Invalid enum value"`.
-Never show that raw string to an end user — map on status code and, where you need
-field-level UI, validate client-side first with a mirror of the server schema.
 
-**Status codes used**
+There is no `code`, no `fields[]`, no `details`. Validation failures arrive as a
+single 400 with every issue joined into one string:
+
+```
+"Invalid request body - items.0.quantity: quantity must be greater than 0; type: Invalid enum value"
+```
+
+**Never render that string to an end user.** Branch on the status code, and where
+you need field-level errors, validate client-side first against a zod mirror of the
+server schema.
+
+**Status codes**
+
 | Code | Meaning in this API |
 |---|---|
 | 200 | OK |
-| 201 | Created (also: order sync's *first* call) |
-| 400 | Validation failure, or a business rule refusing the action (over-discount, over-refund, wasting more than stock, expired-scan rules, cancelled-order guards) |
-| 401 | Missing/invalid/expired token (owner JWT or staff session) |
-| 402 | Billing locked (`requireActiveBilling`), **and** a declined card payment/refund |
-| 403 | Authenticated but lacks the required permission, or outranked by the target staff member |
-| 404 | Not found **or out of the actor's tenancy scope** — a shop in another company returns 404, never 403 |
-| 409 | Conflict (duplicate SKU, already-resolved scan, offline-sync payload mismatch, insufficient stock on wastage) |
+| 201 | Created — also an offline sync's *first* call |
+| 400 | Validation failure, **or** a business rule refusing the action (over-discount, over-refund, wasting more than stock, un-expired scan, cancelled-order guards, rota disabled, owner trying to clock in) |
+| 401 | Missing / invalid / expired token |
+| 402 | Billing locked, **or** a declined card payment or refund |
+| 403 | Authenticated but lacking the permission, or outranked by the target staff member |
+| 404 | Not found **or outside the actor's tenancy** |
+| 409 | Conflict — duplicate SKU, already-resolved scan, offline-sync payload mismatch, wastage exceeding stock |
 | 429 | Rate limited |
-| 500 | Internal error — message is always the literal `"Internal server error"` |
-
-**Tenancy is enforced by 404.** Requesting a shop/order/item outside the actor's
-company or shop returns 404, not 403. The frontend must not treat 404 as "deleted".
+| 500 | Internal error — the message is always literally `"Internal server error"` |
 
 **Rate limits**
-- Global: 300 requests / 15 min per client IP.
-- `POST /api/staff-auth/login`: 10 attempts / 15 min, keyed by *(IP, shopId)*.
 
-**CORS:** the deployed origin must be listed in the API's `CORS_ALLOWED_ORIGINS`
-env var. `credentials: true` is set, but this API uses **bearer tokens, not cookies**.
+- Global: **300 requests / 15 min** per client IP.
+- `POST /api/staff-auth/login`: **10 attempts / 15 min**, keyed by *(IP, shopId)* —
+  so one shop's failed PINs cannot lock out another shop behind the same NAT.
+- The WebSocket upgrade is **not** rate limited (it never passes through Express).
+
+Surface a 429 as "too many attempts, try again shortly" and **never auto-retry** it.
+
+**CORS:** your origin must appear in the API's `CORS_ALLOWED_ORIGINS`. `credentials:
+true` is set, but this API uses **bearer tokens, not cookies**.
+
+> Currently `CORS_ALLOWED_ORIGINS` is **unset** on the production service, and with
+> `NODE_ENV=production` the API therefore rejects **every** browser origin. Your
+> Vercel domain must be added before the dashboard can call it. Native apps are
+> unaffected — CORS is a browser mechanism.
 
 ---
 
-## 1. Authentication — two entirely separate systems
+## 2. Authentication
 
-There are two kinds of caller and they are **not interchangeable**.
+Two kinds of caller, two token systems, **not interchangeable** — both riding the
+same `Authorization: Bearer` header, which is exactly why they need **separate
+storage keys and separate contexts**. One shared "token" slot will eventually send a
+staff token to an owner-only route, and the resulting 401 is baffling because both
+tokens look identical on the wire.
 
-### Owner (the dashboard user)
+### Owner — the dashboard user
+
 - `Authorization: Bearer <accessToken>` — a **JWT, 15 minutes**.
 - Refreshed with an opaque, **rotating**, server-stored refresh token.
-- Rotation means: each `POST /api/auth/refresh` invalidates the token you sent and
-  returns a new one. Two concurrent refreshes will make one of them fail — the
-  frontend must serialize refreshes (single in-flight promise).
+- **Rotation means each refresh invalidates the token you sent.** Two concurrent
+  refreshes guarantee one failure and can log the user out.
+  **Serialize refreshes**: one in-flight promise that every queued 401 awaits, never
+  one refresh per request.
 
-### Staff (till / KDS user)
+### Staff — till and KDS
+
 - `Authorization: Bearer <sessionToken>` — an **opaque DB-stored token**, sliding
-  **60-minute** window (any authenticated request extends it).
-- Obtained by 8-digit `staffIdCode` + 8-digit `pin` against a specific `shopId`.
-- There is **no refresh endpoint** for staff. When the session expires, re-PIN-in.
+  **60-minute** window that any authenticated request extends.
+- Obtained with an 8-digit `staffIdCode` + 8-digit `pin` against a specific `shopId`.
+- **There is no staff refresh endpoint.** On expiry, the user re-enters their PIN.
+- A connected KDS socket keeps the session alive on its own heartbeat.
 
 ### Which token does a route accept?
-| Middleware | Accepts | Routes |
+
+| Middleware | Accepts | Applies to |
 |---|---|---|
-| `requireAuth` | Owner JWT **only** | `/api/me`, `/api/companies/*` (incl. master menu + inventory-overview), `/api/shops` CRUD + addons |
-| `requireStaffOrOwnerAuth` | **Either**, on the same `Authorization` header | every `/api/shops/:shopId/<resource>` route, and `/api/staff-permissions` |
+| `requireAuth` | Owner JWT **only** | `/api/me`, all `/api/companies/*` (incl. master menu and inventory-overview), `/api/shops` CRUD and add-ons |
+| `requireStaffOrOwnerAuth` | **Either** | every `/api/shops/:shopId/<resource>` route, and `/api/staff-permissions` |
 | none | — | `/api/auth/*`, `/api/staff-auth/*`, `/api/webhooks/stripe`, `/health` |
 
-`requireStaffOrOwnerAuth` sets `req.actor = { type: 'owner' | 'staff', id, ... }`.
-An **owner bypasses the permission system entirely** — every permission check below
-applies only to staff actors.
+`requireStaffOrOwnerAuth` tries the cheap synchronous JWT check first and only falls
+through to a staff-session DB lookup if that fails. It sets
+`req.actor = { type: 'owner' | 'staff', id, … }`.
 
 ---
 
-## 2. Roles & permissions
+## 3. Authorization
 
-**Roles:** `owner`, `manager`, `shift_manager`, `server`, `chef`
-(`owner` is not a staff role — it is the account holder).
+**Roles:** `owner`, `manager`, `shift_manager`, `server`, `chef`.
+`owner` is the account holder, not a staff row.
 
-**Rank (for staff management):** owner 4 > manager 3 > shift_manager 2 > server 1 = chef 1.
-A staff member may only create/edit/deactivate someone **strictly below** their own
-rank. This is why "a Manager cannot create another Manager" needs no special case.
+**Rank:** owner 4 > manager 3 > shift_manager 2 > server 1 = chef 1.
+A staff member may only create, edit or deactivate someone **strictly below** their
+own rank — which is why "a Manager cannot create another Manager" needs no special
+case. Server and Chef are deliberately equal; neither outranks the other.
 
-**Permissions (13):**
-`view_inventory`, `manage_inventory`, `request_stock_order`, `manage_stock_orders`,
-`manage_staff`, `access_till`, `perform_health_safety`, `grant_permissions`,
-`view_reports`, `manage_rota`, `manage_menu`, `apply_discount`, `view_kds`
+**The owner bypasses the permission system entirely.** Every check below applies to
+staff actors only. **Gate your UI on actor type first, then permission** — branching
+on permission alone gives the owner a crippled dashboard.
 
-**Defaults per role:**
+**The 13 permissions and their role defaults**
 
 | Permission | Manager | Shift Mgr | Server | Chef |
 |---|:--:|:--:|:--:|:--:|
-| view_inventory | ✅ | | | ✅ |
-| manage_inventory | ✅ | | | |
-| request_stock_order | | | | ✅ |
-| manage_stock_orders | ✅ | | | |
-| manage_staff | ✅ | | | |
-| access_till | ✅ | ✅ | ✅ | |
-| perform_health_safety | ✅ | ✅ | ✅ | ✅ |
-| grant_permissions | ✅ | | | |
-| manage_rota | ✅ | | | |
-| manage_menu | ✅ | | | |
-| apply_discount | ✅ | ✅ | | |
-| view_kds | ✅ | ✅ | | ✅ |
-| view_reports | | | | |
+| `view_inventory` | ✅ | | | ✅ |
+| `manage_inventory` | ✅ | | | |
+| `request_stock_order` | | | | ✅ |
+| `manage_stock_orders` | ✅ | | | |
+| `manage_staff` | ✅ | | | |
+| `access_till` | ✅ | ✅ | ✅ | |
+| `perform_health_safety` | ✅ | ✅ | ✅ | ✅ |
+| `grant_permissions` | ✅ | | | |
+| `manage_rota` | ✅ | | | |
+| `manage_menu` | ✅ | | | |
+| `apply_discount` | ✅ | ✅ | | |
+| `view_kds` | ✅ | ✅ | | ✅ |
+| `view_reports` | | | | |
 
-`view_reports` has no default holder and nothing checks it yet (Module 12).
+`view_reports` has no default holder and **nothing checks it yet** (Module 12).
 
-**Overrides are additive only.** `POST /api/staff-permissions/:staffId` grants an
-extra permission to one person; there is no deny-list. So the effective set is
-`role defaults ∪ active overrides`.
+**Overrides are additive only.** The effective set is `role defaults ∪ active
+overrides`. There is no deny-list, so an override can never strip a role's own
+default. Grant with `POST /api/staff-permissions/:staffId`.
 
-**The Chef/till split is load-bearing.** The Chef is the KDS's primary user and has
-**no `access_till`** — so `GET /api/shops/:id/orders/:orderId` correctly 403s them.
-The KDS gets a *narrowed* order payload (see §14) with every monetary field stripped.
+**Permission-gated UI is a mirror, never the enforcement.** Use it to hide or
+disable controls; the server is the authority and a 403 must still render
+gracefully.
+
+### The Chef/till split is load-bearing
+
+The Chef is the KDS's primary user and has **no `access_till`** — deliberately. So
+`GET /api/shops/:id/orders/:orderId` correctly **403s a Chef**, and the KDS instead
+receives a **narrowed payload with every monetary field stripped** (§8). Do not
+build a kitchen screen that calls the orders REST endpoints as a Chef; it will fail.
+
+### Tenancy is enforced by 404, not 403
+
+Anything outside the actor's company or shop returns **404**. Never render "this was
+deleted" on a 404 — render **"not found, or you don't have access"**.
 
 ---
 
-## 3. Health
+## 4. Endpoint index
 
-| Method | Path | Auth |
+Every endpoint, one row each. `owner` = owner JWT only; `either` =
+`requireStaffOrOwnerAuth`. The permission column applies to **staff actors only**.
+
+### Public — no token
+
+| Method | Path | Notes |
 |---|---|---|
-| GET | `/health` | none |
+| GET | `/health` | `{ status, db, environment, timestamp }` · 503 if the DB is down |
+| POST | `/api/auth/register` | |
+| POST | `/api/auth/verify-email` | |
+| POST | `/api/auth/resend-verification` | |
+| POST | `/api/auth/login` | |
+| POST | `/api/auth/refresh` | rotates |
+| POST | `/api/auth/logout` | |
+| POST | `/api/auth/forgot-password` | |
+| POST | `/api/auth/reset-password` | |
+| POST | `/api/auth/confirm-email-change` | |
+| POST | `/api/staff-auth/login` | rate limited 10/15min per (IP, shop) |
+| POST | `/api/staff-auth/logout` | |
+| POST | `/api/webhooks/stripe` | Stripe only — not for the frontend |
 
-200 `{ status, db, environment, timestamp }` · 503 if the DB is unreachable.
+### Owner profile & company — owner JWT
+
+| Method | Path | Notes |
+|---|---|---|
+| GET · PATCH | `/api/me` | |
+| POST | `/api/me/change-password` | |
+| POST | `/api/me/change-email` | sets `pendingEmail` |
+| POST | `/api/companies` | one per owner; grants the one-time trial |
+| GET · PATCH · DELETE | `/api/companies/mine` | PATCH cannot set `businessType` / `cardPaymentMode` |
+| POST | `/api/companies/mine/business-type` | |
+| POST | `/api/companies/mine/card-payment-mode` | |
+| GET | `/api/companies/mine/billing-history` | `?limit=1..100` |
+| GET | `/api/companies/mine/inventory-overview` | `?lowStockOnly=true` — cross-shop |
+
+### Shops & add-ons — owner JWT
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/shops` | **402 if billing locked** |
+| GET | `/api/shops` | |
+| GET · PATCH · DELETE | `/api/shops/:id` | DELETE is a soft delete |
+| POST | `/api/shops/:shopId/addons` | **402 if billing locked** |
+| GET | `/api/shops/:shopId/addons` | |
+| DELETE | `/api/shops/:shopId/addons/:addonType` | |
+
+### Master menu — owner JWT only, staff cannot reach these
+
+| Method | Path |
+|---|---|
+| POST · GET | `/api/companies/mine/menu-categories` |
+| PATCH · DELETE | `/api/companies/mine/menu-categories/:categoryId` |
+| POST · GET | `/api/companies/mine/menu-items` |
+| GET · PATCH · DELETE | `/api/companies/mine/menu-items/:itemId` |
+| POST · GET | `/api/companies/mine/menu-items/:itemId/variants` |
+| PATCH · DELETE | `/api/companies/mine/menu-items/:itemId/variants/:variantId` |
+| POST · GET | `/api/companies/mine/modifier-groups` |
+| PATCH · DELETE | `/api/companies/mine/modifier-groups/:groupId` |
+| POST · GET | `/api/companies/mine/modifier-groups/:groupId/options` |
+| PATCH · DELETE | `/api/companies/mine/modifier-groups/:groupId/options/:optionId` |
+| POST · DELETE | `/api/companies/mine/menu-items/:itemId/modifier-groups/:groupId` |
+| GET | `/api/companies/mine/menu-items/:itemId/modifier-groups` |
+| POST · GET | `/api/companies/mine/ingredients` |
+| PATCH · DELETE | `/api/companies/mine/ingredients/:ingredientId` |
+| POST · PATCH · DELETE | `/api/companies/mine/menu-items/:itemId/ingredients/:ingredientId` |
+| GET | `/api/companies/mine/menu-items/:itemId/ingredients` |
+| POST · PATCH · DELETE | `/api/companies/mine/menu-items/:itemId/variants/:variantId/ingredients/:ingredientId` |
+| GET | `/api/companies/mine/menu-items/:itemId/variants/:variantId/ingredients` |
+| POST · PATCH · DELETE | `/api/companies/mine/modifier-groups/:groupId/options/:optionId/ingredients/:ingredientId` |
+| GET | `/api/companies/mine/modifier-groups/:groupId/options/:optionId/ingredients` |
+
+**40 endpoints.**
+
+### Staff & permission overrides — either token
+
+| Method | Path | Staff permission |
+|---|---|---|
+| POST | `/api/shops/:shopId/staff` | `manage_staff` + outrank |
+| GET | `/api/shops/:shopId/staff` | — (scope only) |
+| GET | `/api/shops/:shopId/staff/:staffId` | — (scope only) |
+| PATCH · DELETE | `/api/shops/:shopId/staff/:staffId` | `manage_staff` + outrank |
+| GET | `/api/staff-permissions/shop/:shopId/audit-log` | `grant_permissions` |
+| GET | `/api/staff-permissions/:staffId` | — (scope only) |
+| POST | `/api/staff-permissions/:staffId` | `grant_permissions` + outrank |
+| DELETE | `/api/staff-permissions/:staffId/:permission` | `grant_permissions` + outrank |
+
+Note the shape: `:staffId` alone, **no `:shopId`** except on the audit log.
+
+### Rota — either token · **every route 400s unless the shop has `rotaEnabled`**
+
+| Method | Path | Staff permission |
+|---|---|---|
+| POST | `/api/shops/:shopId/rota-shifts` | `manage_rota` |
+| GET | `/api/shops/:shopId/rota-shifts` | — (`?from=&to=` both required) |
+| GET | `/api/shops/:shopId/rota-shifts/:shiftId` | — |
+| PATCH · DELETE | `/api/shops/:shopId/rota-shifts/:shiftId` | `manage_rota` |
+| POST | `/api/shops/:shopId/swap-requests` | — **for your own shift**; `manage_rota` for anyone else's |
+| GET | `/api/shops/:shopId/swap-requests` | — (`?status=`) |
+| GET | `/api/shops/:shopId/swap-requests/:requestId` | — |
+| POST | `/api/shops/:shopId/swap-requests/:requestId/approve` | `manage_rota` |
+| POST | `/api/shops/:shopId/swap-requests/:requestId/reject` | `manage_rota` |
+| POST | `/api/shops/:shopId/attendance/clock-in` | **staff actor only** — an owner gets 400 |
+| POST | `/api/shops/:shopId/attendance/clock-out` | **staff actor only** — an owner gets 400 |
+| GET | `/api/shops/:shopId/attendance/comparison` | `manage_rota` (always) |
+| GET | `/api/shops/:shopId/attendance` | — but **silently narrowed to your own** without `manage_rota` |
+| GET | `/api/shops/:shopId/attendance/:recordId` | — for your own; **403** for anyone else's without `manage_rota` |
+
+### Shop menu — either token · `GET` open, **every mutation needs `manage_menu`**
+
+| Method | Path |
+|---|---|
+| GET | `/api/shops/:shopId/menu` — **the resolved menu** |
+| PATCH · DELETE | `/api/shops/:shopId/menu/overrides/:menuItemId` |
+| PATCH · DELETE | `/api/shops/:shopId/menu/variants/:variantId` |
+| PATCH · DELETE | `/api/shops/:shopId/menu/modifier-options/:optionId` |
+| POST · GET | `/api/shops/:shopId/menu/items` |
+| GET · PATCH · DELETE | `/api/shops/:shopId/menu/items/:itemId` |
+| POST · DELETE | `/api/shops/:shopId/menu/items/:itemId/modifier-groups/:groupId` |
+| POST · PATCH · DELETE | `/api/shops/:shopId/menu/items/:itemId/ingredients/:ingredientId` |
+| GET | `/api/shops/:shopId/menu/items/:itemId/ingredients` |
+
+**18 endpoints.**
+
+### Inventory & suppliers — either token · reads `view_inventory`, writes `manage_inventory`
+
+| Method | Path | Staff permission |
+|---|---|---|
+| POST | `/api/shops/:shopId/inventory-items` | `manage_inventory` |
+| GET | `/api/shops/:shopId/inventory-items` | `view_inventory` (`?lowStockOnly=true`) |
+| GET | `/api/shops/:shopId/inventory-items/:itemId` | `view_inventory` |
+| PATCH · DELETE | `/api/shops/:shopId/inventory-items/:itemId` | `manage_inventory` |
+| POST · PATCH · DELETE | `/api/shops/:shopId/inventory-items/:itemId/suppliers/:supplierId` | `manage_inventory` |
+| GET | `/api/shops/:shopId/inventory-items/:itemId/suppliers` | `view_inventory` |
+| POST · PATCH · DELETE | `/api/shops/:shopId/inventory-items/:itemId/ingredient-links/:ingredientId` | `manage_inventory` |
+| GET | `/api/shops/:shopId/inventory-items/:itemId/ingredient-links` | `view_inventory` |
+| POST | `/api/shops/:shopId/suppliers` | `manage_inventory` |
+| GET | `/api/shops/:shopId/suppliers` | `view_inventory` |
+| GET | `/api/shops/:shopId/suppliers/:supplierId` | `view_inventory` |
+| PATCH · DELETE | `/api/shops/:shopId/suppliers/:supplierId` | `manage_inventory` |
+| POST | `/api/shops/:shopId/purchase-orders` | `manage_inventory` |
+| GET | `/api/shops/:shopId/purchase-orders` | `view_inventory` |
+| GET | `/api/shops/:shopId/purchase-orders/:poId` | `view_inventory` |
+| DELETE | `/api/shops/:shopId/purchase-orders/:poId` | `manage_inventory` |
+| POST | `/api/shops/:shopId/purchase-orders/:poId/receipts` | `manage_inventory` |
+| POST · GET | `/api/shops/:shopId/wastage-logs` | **`view_inventory` for both** |
+| GET | `/api/shops/:shopId/wastage-logs/:wastageLogId` | `view_inventory` |
+
+### Health & safety — either token · **all `perform_health_safety`**
+
+| Method | Path |
+|---|---|
+| POST · GET | `/api/shops/:shopId/inventory-scans` |
+| GET | `/api/shops/:shopId/inventory-scans/latest` |
+| GET | `/api/shops/:shopId/inventory-scans/expired` |
+| GET | `/api/shops/:shopId/inventory-scans/:scanId` |
+| POST | `/api/shops/:shopId/inventory-scans/:scanId/print` |
+| GET | `/api/shops/:shopId/inventory-scans/:scanId/prints` |
+| POST | `/api/shops/:shopId/inventory-scans/:scanId/resolve` |
+| GET | `/api/shops/:shopId/inventory-scans/:scanId/resolution` |
+
+### Orders / till — either token
+
+| Method | Path | Staff permission |
+|---|---|---|
+| POST · GET | `/api/shops/:shopId/orders` | `access_till` |
+| POST | `/api/shops/:shopId/orders/sync` | `access_till` |
+| GET | `/api/shops/:shopId/orders/:orderId` | `access_till` |
+| POST | `/api/shops/:shopId/orders/:orderId/items` | `access_till` |
+| PATCH | `/api/shops/:shopId/orders/:orderId/discount` | **`apply_discount`** |
+| PATCH | `/api/shops/:shopId/orders/:orderId/items/:orderItemId/discount` | **`apply_discount`** |
+| POST | `/api/shops/:shopId/orders/:orderId/cancel` | `access_till` |
+| POST | `/api/shops/:shopId/orders/:orderId/items/:orderItemId/void` | `access_till` |
+| PATCH | `/api/shops/:shopId/orders/:orderId/items/:orderItemId/status` | **`view_kds`** |
+| POST | `/api/shops/:shopId/orders/:orderId/payments` | `access_till` |
+| POST | `/api/shops/:shopId/orders/:orderId/payments/:paymentId/refund` | **`apply_discount`** |
+
+**There is no DELETE anywhere in the orders module.** Cancel, void and refund are
+explicit, one-directional actions that create records; nothing is ever removed.
+
+### WebSocket
+
+| Path | Permission |
+|---|---|
+| `GET wss://<host>/api/shops/:shopId/kds/socket` | `view_kds` |
+
+### Totals
+
+| Area | Count |
+|---|---:|
+| Health | 1 |
+| Owner auth + profile | 13 |
+| Staff auth | 2 |
+| Company + billing | 7 |
+| Master menu | 40 |
+| Cross-shop inventory overview | 1 |
+| Shops + add-ons | 8 |
+| Staff + permission overrides | 9 |
+| Rota | 15 |
+| Shop menu | 18 |
+| Inventory + supplier/ingredient links | 13 |
+| Suppliers | 5 |
+| Purchase orders + receiving | 5 |
+| Wastage | 3 |
+| Health & safety scans | 9 |
+| Orders / till | 12 |
+| Stripe webhook | 1 |
+| **Total REST** | **162** |
+| WebSocket | 1 |
 
 ---
 
-## 4. Owner auth — `/api/auth` (no auth required)
+## 5. Owner dashboard
 
-| Method | Path | Body | Returns |
-|---|---|---|---|
-| POST | `/register` | `{ email, password (min 10), fullName }` | 201 `{ message, user: { id, email, fullName } }` |
-| POST | `/verify-email` | `{ token }` | 200 `{ message }` |
-| POST | `/resend-verification` | `{ email }` | 200 `{ message }` (always the same message — no account enumeration) |
-| POST | `/login` | `{ email, password }` | 200 `{ accessToken, refreshToken, user: { id, email } }` |
-| POST | `/refresh` | `{ refreshToken }` | 200 `{ accessToken, refreshToken }` (**rotated**) |
-| POST | `/logout` | `{ refreshToken }` | 200 `{ message }` (no-op on an unknown token) |
-| POST | `/forgot-password` | `{ email }` | 200 `{ message }` (always identical) |
-| POST | `/reset-password` | `{ token, newPassword (min 10) }` | 200 `{ message }` |
-| POST | `/confirm-email-change` | `{ token }` | 200 `{ message, email }` |
+### Auth flows and the pages you must provide
 
-**Email link landing pages the frontend MUST provide** (the API builds these URLs
-from its `FRONTEND_URL` env var):
+| Endpoint | Body | Returns |
+|---|---|---|
+| `POST /api/auth/register` | `{ email, password (min 10), fullName }` | 201 `{ message, user: { id, email, fullName } }` |
+| `POST /api/auth/verify-email` | `{ token }` | `{ message }` |
+| `POST /api/auth/resend-verification` | `{ email }` | `{ message }` — always identical, no account enumeration |
+| `POST /api/auth/login` | `{ email, password }` | `{ accessToken, refreshToken, user: { id, email } }` |
+| `POST /api/auth/refresh` | `{ refreshToken }` | `{ accessToken, refreshToken }` — **rotated** |
+| `POST /api/auth/logout` | `{ refreshToken }` | `{ message }` — no-op on an unknown token |
+| `POST /api/auth/forgot-password` | `{ email }` | `{ message }` — always identical |
+| `POST /api/auth/reset-password` | `{ token, newPassword (min 10) }` | `{ message }` |
+| `POST /api/auth/confirm-email-change` | `{ token }` | `{ message, email }` |
+
+The API builds email links from its `FRONTEND_URL`, so the dashboard **must** serve
+these landing routes:
+
 - `/verify-email?token=…`
 - `/reset-password?token=…`
 - `/confirm-email-change?token=…`
-- `/billing` (linked from billing failure emails)
+- `/billing` — linked from billing-failure emails
 
----
+> `FRONTEND_URL` is currently the placeholder `https://REPLACE-ME.vercel.app` on the
+> production API. Until it is set to the real domain, every emailed link is broken.
 
-## 5. Owner profile — `/api/me` (owner JWT)
+**Profile — `/api/me`:** `GET` and `PATCH { fullName }` return
+`{ id, email, fullName, emailVerified, pendingEmail }`.
+`POST /change-password { currentPassword, newPassword }`.
+`POST /change-email { currentPassword, newEmail }` sets `pendingEmail`; a
+confirmation email completes the change.
 
-| Method | Path | Body | Returns |
-|---|---|---|---|
-| GET | `/` | — | `{ id, email, fullName, emailVerified, pendingEmail }` |
-| PATCH | `/` | `{ fullName }` | same shape |
-| POST | `/change-password` | `{ currentPassword, newPassword }` | `{ message }` |
-| POST | `/change-email` | `{ currentPassword, newEmail }` | `{ message }` — sets `pendingEmail`; a confirmation email completes it |
+### Company
 
----
+`POST /api/companies` — `{ name, addressLine1, addressLine2?, city, postcode,
+country, phone, vatNumber?, companyNumber? }`. One company per owner; creating it
+grants the one-time trial.
 
-## 6. Staff auth — `/api/staff-auth` (no auth required)
-
-| Method | Path | Body | Returns |
-|---|---|---|---|
-| POST | `/login` | `{ shopId (uuid), staffIdCode (8 digits), pin (8 digits) }` | `{ sessionToken, staff: { id, fullName, role, shopId } }` |
-| POST | `/logout` | `{ sessionToken }` | `{ message }` |
-
-Login also fails if the company's billing is locked. Rate limited to 10 / 15 min
-per (IP, shop) — surface the 429 as "too many attempts, try again shortly", and
-**do not auto-retry**.
-
----
-
-## 7. Company — `/api/companies` (owner JWT)
-
-| Method | Path | Body / Query | Notes |
-|---|---|---|---|
-| POST | `/` | `{ name, addressLine1, addressLine2?, city, postcode, country, phone, vatNumber?, companyNumber? }` | One company per owner. Grants the one-time trial. |
-| GET | `/mine` | — | Company object (below) |
-| PATCH | `/mine` | any subset of the create fields | **Cannot** set `businessType` or `cardPaymentMode` |
-| DELETE | `/mine` | — | Soft delete |
-| POST | `/mine/business-type` | `{ businessType: 'single' \| 'chain' }` | Dedicated action — an onboarding decision |
-| POST | `/mine/card-payment-mode` | `{ cardPaymentMode: 'platform' \| 'own' }` | Dedicated action — decides how money is taken |
-| GET | `/mine/billing-history` | `?limit=1..100` (default 10) | `{ invoices: [...], hasMore }` — Stripe invoices; **not** billing-gated |
-
-**Company response object**
 ```jsonc
+// GET /api/companies/mine
 {
   "id", "name", "addressLine1", "addressLine2", "city", "postcode", "country",
   "phone", "vatNumber", "companyNumber",
   "businessType": "single" | "chain" | null,   // null until set — drive onboarding off this
-  "cardPaymentMode": "platform" | "own",       // never null, defaults to "platform"
+  "cardPaymentMode": "platform" | "own",       // never null; defaults to "platform"
   "trialEndsAt", "subscriptionStatus", "gracePeriodEndsAt",
   "createdAt", "updatedAt"
 }
 ```
 
-**Billing lock.** When billing lapses past the grace period, `requireActiveBilling`
-returns **402** on the billing-gated routes only:
-`POST /api/shops` and `POST /api/shops/:shopId/addons`. Staff PIN login also fails.
-Everything else — viewing, editing, closing shops, and billing history — stays open
-so the owner can see and reduce their bill. Derive the "locked" banner from
-`subscriptionStatus` + `gracePeriodEndsAt`; the API does not return an
-`isBillingLocked` flag.
+`PATCH /mine` accepts any subset of the create fields but **cannot** set
+`businessType` or `cardPaymentMode`. Each of those has a dedicated action, because
+each decides something structural:
+
+- `POST /mine/business-type` — `{ businessType: 'single' | 'chain' }`
+- `POST /mine/card-payment-mode` — `{ cardPaymentMode: 'platform' | 'own' }`
+
+**Billing lock.** When billing lapses past the grace period, **402** is returned on
+exactly two routes: `POST /api/shops` and `POST /api/shops/:shopId/addons`. Staff
+PIN login also fails. Everything else stays open — viewing, editing and closing
+shops, and billing history — so the owner can see and *reduce* their bill.
+
+**There is no `isBillingLocked` flag.** Derive the banner from `subscriptionStatus`
++ `gracePeriodEndsAt`.
 
 **`cardPaymentMode` semantics**
-- `platform` — card payments go through our provider; the payment row gets a
-  `providerReference`; a declined card returns **402**.
-- `own` — the shop uses its own terminal. The till still records
-  `method: "card"` with full card semantics (fixed amount, capped at the balance,
-  no over-tender/change), but **no provider is called** and `providerReference` is
-  `null`. Refunds key off the *payment's own* `providerReference`, never the
-  company's current mode.
 
----
-
-## 8. Master menu — `/api/companies/mine/…` (owner JWT only)
-
-Company-level master data. **Staff cannot reach these routes at all** — staff work
-against the resolved shop menu in §12.
-
-**Categories**
-| Method | Path |
+| Mode | Behaviour |
 |---|---|
-| POST | `/menu-categories` — `{ name, displayOrder? }` |
-| GET | `/menu-categories` |
-| PATCH | `/menu-categories/:categoryId` — `{ name?, displayOrder?, isActive? }` |
-| DELETE | `/menu-categories/:categoryId` |
+| `platform` | Cards go through our provider. The payment row gets a `providerReference`. A decline returns **402**. |
+| `own` | The shop uses its own terminal. The till still records `method: "card"` with full card semantics (fixed amount, capped at the balance, no over-tender or change), but **no provider is called** and `providerReference` is `null`. |
 
-**Items**
-| Method | Path |
-|---|---|
-| POST | `/menu-items` — `{ categoryId, name, description?, price, displayOrder? }` |
-| GET | `/menu-items?categoryId=` |
-| GET | `/menu-items/:itemId` |
-| PATCH | `/menu-items/:itemId` |
-| DELETE | `/menu-items/:itemId` |
+Refunds key off the **payment's own `providerReference`**, never the company's
+current mode — so switching terminals between taking a payment and refunding it is
+always handled correctly.
 
-**Size variants** (a variant price is **absolute** — it *replaces* the item price)
-| Method | Path |
-|---|---|
-| POST | `/menu-items/:itemId/variants` — `{ name, price, displayOrder? }` |
-| GET | `/menu-items/:itemId/variants` |
-| PATCH | `/menu-items/:itemId/variants/:variantId` |
-| DELETE | `/menu-items/:itemId/variants/:variantId` |
+`GET /mine/billing-history?limit=1..100` (default 10) → `{ invoices: [...], hasMore }`.
+Stripe invoices; **not** billing-gated.
 
-**Modifier groups & options** (an option `priceDelta` is **additive**, may be negative)
-| Method | Path |
-|---|---|
-| POST | `/modifier-groups` — `{ name, minSelections?, maxSelections? }` |
-| GET | `/modifier-groups` |
-| PATCH · DELETE | `/modifier-groups/:groupId` |
-| POST | `/modifier-groups/:groupId/options` — `{ name, priceDelta?, displayOrder? }` |
-| GET | `/modifier-groups/:groupId/options` |
-| PATCH · DELETE | `/modifier-groups/:groupId/options/:optionId` |
-| POST · DELETE | `/menu-items/:itemId/modifier-groups/:groupId` (attach/detach, no body) |
-| GET | `/menu-items/:itemId/modifier-groups` |
+### Shops
 
-**Ingredients & allergens**
-| Method | Path |
+`POST /api/shops` — `{ name, addressLine1, addressLine2?, city, postcode, country,
+phone, kdsEnabled?, rotaEnabled?, vatRegistered, defaultVatRate? }`.
+**`vatRegistered` is required**; `defaultVatRate` is 0–100.
+
+Response: `{ id, name, addressLine1, addressLine2, city, postcode, country, phone,
+kdsEnabled, rotaEnabled, vatRegistered, defaultVatRate, createdAt, updatedAt }`.
+
+- **`rotaEnabled` is enforced** — every rota route returns **400 "Rota is not enabled
+  for this shop"** when it is false. Hide the whole rota section rather than letting
+  users hit that error.
+- **`kdsEnabled` is *not* enforced anywhere.** The KDS socket works regardless. Treat
+  it as a display preference only, and do not rely on it to gate access.
+- A shop with `vatRegistered: true` and no `defaultVatRate` is treated as **0%** at
+  order time. The API will not block a sale over an owner's misconfiguration, so the
+  **frontend should warn on the shop settings screen**.
+
+**Add-ons:** `POST /:shopId/addons { addonType: 'health_safety' }` (402 if billing
+locked), `GET /:shopId/addons`, `DELETE /:shopId/addons/:addonType`.
+`health_safety` is the only type today.
+
+> **The add-on is not enforced.** Nothing in the health & safety module checks
+> whether it is active — the scan endpoints work either way. Gate the H&S UI on the
+> add-on yourself if that is the product intent.
+
+### Master menu — `/api/companies/mine/…`
+
+Company-level master data, **owner JWT only**. Staff cannot reach these routes at
+all; they work against the resolved shop menu (§6).
+
+| Resource | Body |
 |---|---|
-| POST | `/ingredients` — `{ name, unit, allergens?: Allergen[] }` |
-| GET | `/ingredients` |
-| PATCH · DELETE | `/ingredients/:ingredientId` |
+| Categories | `{ name, displayOrder? }`; PATCH adds `isActive?` |
+| Items | `{ categoryId, name, description?, price, displayOrder? }`; `GET /menu-items?categoryId=` |
+| Variants | `{ name, price, displayOrder? }` |
+| Modifier groups | `{ name, minSelections?, maxSelections? }` |
+| Modifier options | `{ name, priceDelta?, displayOrder? }` |
+| Ingredients | `{ name, unit, allergens?: Allergen[] }` |
+| Recipes (all three levels) | `{ quantity: number > 0 }` |
+
+**Two pricing rules that are deliberately different shapes:**
+
+- A **variant price is ABSOLUTE** — it *replaces* the item's price.
+- A modifier option's **`priceDelta` is ADDITIVE** and may be negative.
+
+**Recipes sum ADDITIVELY** across base item + variant + modifiers — the opposite
+shape from pricing. A variant recipe lists only the **extra** over the base.
 
 `Allergen` ∈ `celery, gluten, crustaceans, eggs, fish, lupin, milk, molluscs,
-mustard, tree_nuts, peanuts, sesame, soybeans, sulphites` (UK 14).
+mustard, tree_nuts, peanuts, sesame, soybeans, sulphites` (the UK 14).
 
-**Recipes** — all three take `{ quantity: number > 0 }` on POST/PATCH:
-| Level | Paths |
-|---|---|
-| Item | `POST·PATCH·DELETE /menu-items/:itemId/ingredients/:ingredientId` · `GET /menu-items/:itemId/ingredients` |
-| Variant | `POST·PATCH·DELETE /menu-items/:itemId/variants/:variantId/ingredients/:ingredientId` · `GET …/ingredients` |
-| Modifier option | `POST·PATCH·DELETE /modifier-groups/:groupId/options/:optionId/ingredients/:ingredientId` · `GET …/ingredients` |
+### Staff
 
-**Recipes sum ADDITIVELY** across base item + variant + modifiers — deliberately the
-opposite shape from pricing, where a variant price *replaces* the item's. A variant
-recipe lists only the **extra** over the base.
-
----
-
-## 9. Cross-shop inventory overview
-
-| Method | Path | Auth |
-|---|---|---|
-| GET | `/api/companies/mine/inventory-overview?lowStockOnly=true` | **Owner JWT only** |
-
-Flat list of every active inventory item across every active shop in the company,
-each row tagged with `shopId` / `shopName`, plus computed `isLowStock`. Owner-only
-because no staff role has cross-shop authority anywhere in this system.
-
----
-
-## 10. Shops — `/api/shops` (owner JWT)
-
-| Method | Path | Body | Notes |
-|---|---|---|---|
-| POST | `/` | `{ name, addressLine1, addressLine2?, city, postcode, country, phone, kdsEnabled?, rotaEnabled?, vatRegistered, defaultVatRate? }` | **Billing-gated (402)** |
-| GET | `/` | — | List |
-| GET | `/:id` | — | |
-| PATCH | `/:id` | partial of the above | |
-| DELETE | `/:id` | — | Soft delete |
-
-**Shop response:** `{ id, name, addressLine1, addressLine2, city, postcode, country,
-phone, kdsEnabled, rotaEnabled, vatRegistered, defaultVatRate, createdAt, updatedAt }`
-
-`vatRegistered` is **required** on create. `defaultVatRate` is 0–100. A shop with
-`vatRegistered: true` and no `defaultVatRate` is treated as **0%** at order time —
-the API will not block a sale over an owner's misconfiguration, so the *frontend*
-should warn on the shop settings screen.
-
-**Add-ons** (nested, owner JWT)
-| Method | Path | Body | Notes |
-|---|---|---|---|
-| POST | `/:shopId/addons` | `{ addonType: 'health_safety' }` | **Billing-gated (402)** |
-| GET | `/:shopId/addons` | — | |
-| DELETE | `/:shopId/addons/:addonType` | — | |
-
-`health_safety` is currently the only add-on type. Module 8's scan endpoints depend
-on it being active.
-
----
-
-## 11. Staff & permissions
-
-### Staff — `/api/shops/:shopId/staff` (owner or staff)
 Writes need **`manage_staff`** *and* strictly outranking the target. Reads are open
 to any in-scope actor.
 
-| Method | Path | Body | Notes |
-|---|---|---|---|
-| POST | `/` | `{ fullName, role: 'manager'\|'shift_manager'\|'server'\|'chef' }` | 201. **The response includes a one-time `pin`** |
-| GET | `/` | — | List |
-| GET | `/:staffId` | — | |
-| PATCH | `/:staffId` | `{ fullName?, role? }` | |
-| DELETE | `/:staffId` | — | Deactivate (soft) |
+`POST /` — `{ fullName, role: 'manager' | 'shift_manager' | 'server' | 'chef' }`
+Response: `{ id, shopId, fullName, role, staffIdCode, createdAt, updatedAt }`.
 
-**Staff response:** `{ id, shopId, fullName, role, staffIdCode, createdAt, updatedAt }`
-— plus `pin` **only on the 201 from POST**. The raw PIN is never retrievable again.
-The frontend must show it once, prominently, with a copy/print affordance and an
-explicit "you will not see this again" warning.
+> **The 201 from `POST` is the only time the `pin` is ever returned.** It is never
+> retrievable again. Show it once, prominently, with a copy/print affordance and an
+> explicit "you will not see this again" warning.
 
-### Permission overrides — `/api/staff-permissions` (owner or staff)
-Writes need **`grant_permissions`** and outranking the target.
+**Permission overrides — `/api/staff-permissions`:** `POST /:staffId
+{ permission }`, `DELETE /:staffId/:permission`, `GET /:staffId` (effective set),
+`GET /shop/:shopId/audit-log?limit=1..100`.
 
-| Method | Path | Body / Query |
-|---|---|---|
-| GET | `/shop/:shopId/audit-log` | `?limit=1..100` (default 10) |
-| GET | `/:staffId` | — → effective permissions for that staff member |
-| POST | `/:staffId` | `{ permission: <one of the 13> }` |
-| DELETE | `/:staffId/:permission` | — |
+### Rota
 
-Note the shape: `:staffId` alone, **no `:shopId` in the path** except on the audit log.
+**Every route here 400s unless the shop has `rotaEnabled: true`.**
 
----
+| Resource | Body / query |
+|---|---|
+| `rota-shifts` POST/PATCH | `{ staffId, startTime, endTime, notes? }` — ISO datetimes, `endTime > startTime` |
+| `rota-shifts` GET | `?from=&to=` — **both required**, `to > from` |
+| `swap-requests` POST | `{ shiftId, toStaffId, notes? }` — `toStaffId` must differ from the shift's current staff |
+| `swap-requests` GET | `?status=pending\|approved\|rejected` |
+| `attendance` clock-in/out | **no body** — the actor clocks *themselves* |
+| `attendance` GET | `?from=&to=&staffId=` — `from`/`to` **required** |
 
-## 12. Rota — `/api/shops/:shopId/…` (owner or staff)
+**Self-service vs. management — the distinction the UI must respect:**
 
-All three routers require **`manage_rota`** for mutations; reads are scope-checked.
+- **Creating a swap request for your own shift needs no permission.** Requesting one
+  on someone *else's* shift requires `manage_rota`. Approve and reject always
+  require it.
+- **`GET /attendance` silently narrows to your own records** when you lack
+  `manage_rota` — a `staffId` query param is *ignored*, not rejected. Do not present
+  a staff filter to users without the permission; it will appear broken.
+- **`GET /attendance/:recordId` behaves differently**: it **403s** on someone else's
+  record instead of narrowing. Listing is "show me what I may see"; fetching one is
+  an explicit boundary.
+- **Only staff can clock in or out.** An owner gets **400 "Only staff can clock in or
+  out"**. Hide the clock-in control entirely in the owner dashboard.
 
-### `rota-shifts`
-| Method | Path | Body / Query |
-|---|---|---|
-| POST | `/` | `{ staffId, startTime, endTime, notes? }` (ISO datetimes; `endTime > startTime`) |
-| GET | `/` | `?from=&to=` — **both required**, `to > from` |
-| GET | `/:shiftId` | — |
-| PATCH | `/:shiftId` | `{ staffId?, startTime?, endTime?, notes? }` |
-| DELETE | `/:shiftId` | — |
+`GET /attendance/comparison?from=&to=&staffId=` requires `manage_rota` regardless of
+whose attendance it is. Each row is classified `no_show`, `completed`,
+`in_progress` or `unscheduled`. It deliberately does **not** compute "late" or "left
+early" — that needs a tolerance threshold nobody has specified. Raw
+scheduled-vs-actual timestamps are returned so you can decide client-side.
 
-### `swap-requests`
-| Method | Path | Body / Query |
-|---|---|---|
-| POST | `/` | `{ shiftId, toStaffId, notes? }` |
-| GET | `/` | `?status=pending\|approved\|rejected` (optional) |
-| GET | `/:requestId` | — |
-| POST | `/:requestId/approve` | no body |
-| POST | `/:requestId/reject` | no body |
-
-### `attendance`
-| Method | Path | Body / Query |
-|---|---|---|
-| POST | `/clock-in` | no body — the actor clocks themselves in |
-| POST | `/clock-out` | no body |
-| GET | `/comparison` | `?from=&to=&staffId=` — rota vs. actual |
-| GET | `/` | `?from=&to=&staffId=` |
-| GET | `/:recordId` | — |
-
-`from`/`to` are **required** on both list routes. Note `/comparison` is registered
-before `/:recordId` — do not rely on any other ordering client-side.
+`/comparison` is registered before `/:recordId`; do not rely on any other ordering.
 
 ---
 
-## 13. Shop menu — `/api/shops/:shopId/menu` (owner or staff)
+## 6. Shop floor
 
-`GET /` is open to any in-scope actor. **Every mutation needs `manage_menu`.**
+### The resolved menu — `GET /api/shops/:shopId/menu`
 
-| Method | Path | Body |
-|---|---|---|
-| GET | `/` | — → **the resolved menu** (see below) |
-| PATCH | `/overrides/:menuItemId` | `{ isEnabled?, priceOverride? }` |
-| DELETE | `/overrides/:menuItemId` | — (clears the override) |
-| PATCH | `/variants/:variantId` | `{ isEnabled?, priceOverride? }` |
-| DELETE | `/variants/:variantId` | — |
-| PATCH | `/modifier-options/:optionId` | `{ isEnabled?, priceDeltaOverride? }` |
-| DELETE | `/modifier-options/:optionId` | — |
-| POST | `/items` | `{ categoryId, name, description?, price, displayOrder? }` — a shop-**local** item |
-| GET | `/items` | — |
-| GET · PATCH · DELETE | `/items/:itemId` | |
-| POST · DELETE | `/items/:itemId/modifier-groups/:groupId` | attach/detach |
-| POST · PATCH · DELETE | `/items/:itemId/ingredients/:ingredientId` | `{ quantity }` |
-| GET | `/items/:itemId/ingredients` | — |
-
-**`GET /` — the resolved menu is THE endpoint the till renders from.** It already
-applies every shop-level price/enabled override for items, variants *and* modifier
-options. Never re-derive pricing on the client.
+**This is THE endpoint the till renders from.** It already applies every shop-level
+price and enabled override for items, variants *and* modifier options. Never
+re-derive pricing on the client.
 
 ```jsonc
 [
   {
     "id": "uuid",
-    "source": "master" | "local",     // determines which id field you send on an order
+    "source": "master" | "local",   // decides which id field you send on an order
     "categoryId": "uuid",
     "name": "…", "description": "…",
-    "price": 8.5,                      // EFFECTIVE price (override applied)
-    "masterPrice": 9.0,                // null for local items
-    "isEnabled": true,                 // local items are always true
+    "price": 8.5,                    // EFFECTIVE price, override applied
+    "masterPrice": 9.0,              // null for local items
+    "isEnabled": true,               // local items are always true
     "displayOrder": 1,
     "variants": [
       { "id", "name", "price", "masterPrice", "isEnabled", "displayOrder" }
-    ],                                 // always [] for local items
-    "modifierGroups": [ /* groups with minSelections/maxSelections and options */ ],
-    "allergens": ["gluten", "milk"]    // aggregated from the recipe
+    ],                               // always [] for local items
+    "modifierGroups": [ /* each with minSelections / maxSelections and options */ ],
+    "allergens": ["gluten", "milk"]  // aggregated from the recipe
   }
 ]
 ```
 
-**Critical for ordering:** an item with `source: "master"` is ordered as
-`menuItemId`; `source: "local"` is ordered as `shopMenuItemId`. Exactly one of the
-two, never both.
+> **Critical for ordering:** an item with `source: "master"` is ordered as
+> `menuItemId`; `source: "local"` is ordered as `shopMenuItemId`. **Exactly one of
+> the two, never both** — sending both, or neither, is a 400.
 
----
+**Overrides** (all `manage_menu`): `PATCH /overrides/:menuItemId
+{ isEnabled?, priceOverride? }`, `PATCH /variants/:variantId
+{ isEnabled?, priceOverride? }`, `PATCH /modifier-options/:optionId
+{ isEnabled?, priceDeltaOverride? }`. The matching `DELETE` clears the override and
+reverts to the master value.
 
-## 14. Inventory — `/api/shops/:shopId/…` (owner or staff)
+**Shop-local items** live only in this shop: `POST /items { categoryId, name,
+description?, price, displayOrder? }`, plus modifier-group attach/detach and
+recipe management under `/items/:itemId/…`.
 
-Reads need **`view_inventory`**, mutations **`manage_inventory`** — this includes
-`GET`, unlike the menu. Stock is back-of-house.
+### Inventory — `/api/shops/:shopId/inventory-items`
 
-### `inventory-items`
-| Method | Path | Body / Query |
-|---|---|---|
-| POST | `/` | `{ name, unit, quantityOnHand?, lowStockThreshold?, shelfLifeDays?, shelfLifeOpenedDays?, sku? }` |
-| GET | `/` | `?lowStockOnly=true` |
-| GET | `/:itemId` | — |
-| PATCH | `/:itemId` | same fields, all optional; `lowStockThreshold`, `shelfLifeDays`, `shelfLifeOpenedDays`, `sku` are **nullable** |
-| DELETE | `/:itemId` | Soft delete |
+Reads need **`view_inventory`**, mutations **`manage_inventory`** — reads included,
+unlike the menu. Stock is back-of-house.
 
-**"Explicit null clears, omitted leaves untouched"** — this contract applies to
-every nullable field in this API. A PATCH form must therefore distinguish "field
-untouched" (omit it) from "field cleared" (send `null`). Sending `undefined`/`""`
-is not the same thing.
+`POST` / `PATCH` body: `{ name, unit, quantityOnHand?, lowStockThreshold?,
+shelfLifeDays?, shelfLifeOpenedDays?, sku? }`. On `PATCH` every field is optional
+and `lowStockThreshold`, `shelfLifeDays`, `shelfLifeOpenedDays` and `sku` are
+**nullable** — see [§9](#9-cross-cutting-rules).
 
-`isLowStock` is computed at response time from `quantityOnHand` vs
-`lowStockThreshold` — never sent by the client, never stored.
-`sku` is unique **per shop** (409 on duplicate); the same barcode legitimately
-recurs across shops in a chain.
+- `isLowStock` is **computed at response time** from `quantityOnHand` vs
+  `lowStockThreshold`. Never send it; it is never stored.
+- `sku` is unique **per shop** (409 on duplicate). The same barcode legitimately
+  recurs across shops in a chain.
+- `GET /?lowStockOnly=true` filters server-side.
 
-### Item ↔ supplier links
-| Method | Path | Body |
-|---|---|---|
-| POST | `/:itemId/suppliers/:supplierId` | `{ isDefault? }` |
-| GET | `/:itemId/suppliers` | — |
-| PATCH | `/:itemId/suppliers/:supplierId` | `{ isDefault: boolean }` |
-| DELETE | `/:itemId/suppliers/:supplierId` | — |
+**Item ↔ supplier links:** `POST /:itemId/suppliers/:supplierId { isDefault? }`,
+`PATCH … { isDefault }`, `DELETE …`, `GET /:itemId/suppliers`.
+At most one default per item; setting a new one swaps atomically.
 
-At most one default supplier per item; setting a new one swaps atomically.
+**Ingredient ↔ inventory-item links — the deduction bridge:**
+`POST /:itemId/ingredient-links/:ingredientId { conversionFactor? }`,
+`PATCH … { conversionFactor }` (required), `DELETE …`, `GET /:itemId/ingredient-links`.
 
-### Ingredient ↔ inventory-item links (the deduction bridge)
-| Method | Path | Body |
-|---|---|---|
-| POST | `/:itemId/ingredient-links/:ingredientId` | `{ conversionFactor? }` |
-| GET | `/:itemId/ingredient-links` | — |
-| PATCH | `/:itemId/ingredient-links/:ingredientId` | `{ conversionFactor }` (required) |
-| DELETE | `/:itemId/ingredient-links/:ingredientId` | — |
+`conversionFactor` = inventory units per 1 ingredient unit — a recipe in grams
+against stock held in 25 kg sacks. One link per `(shop, ingredient)`.
 
-`conversionFactor` = inventory units per 1 ingredient unit (recipe in grams, stock
-in 25 kg sacks). One link per `(shop, ingredient)`. **An ingredient with no link is
-silently skipped at deduction time** — the frontend should surface unlinked
-ingredients as a setup warning, because the API will not error on it.
+> **An ingredient with no link is silently skipped at deduction time.** The API will
+> not error, so stock quietly fails to move. The frontend should surface unlinked
+> ingredients as a **setup warning** on the inventory screen — this is the single
+> most likely cause of "why isn't my stock going down".
 
-### `suppliers`
+**Cross-shop view:** `GET /api/companies/mine/inventory-overview?lowStockOnly=true`
+is **owner JWT only** — no staff role has authority spanning more than one shop.
+Flat list of every active item in every active shop, each row tagged `shopId` /
+`shopName`, with the same computed `isLowStock`.
+
+### Suppliers
+
 `POST /` · `GET /` · `GET /:supplierId` · `PATCH /:supplierId` · `DELETE /:supplierId`
-Body: `{ name, contactName?, phone?, email?, notes? }` (all but `name` optional).
-Reads `view_inventory`, writes `manage_inventory`.
+Body `{ name, contactName?, phone?, email?, notes? }` — all but `name` optional.
 
-### `purchase-orders`
-| Method | Path | Body | Permission |
-|---|---|---|---|
-| POST | `/` | `{ supplierId, orderedAt?, notes?, items: [{ inventoryItemId, quantity, unitCost? }] }` | `manage_inventory` |
-| GET | `/` | — | `view_inventory` |
-| GET | `/:poId` | — | `view_inventory` |
-| DELETE | `/:poId` | — | `manage_inventory` |
-| POST | `/:poId/receipts` | `{ receivedAt?, notes?, items: [{ purchaseOrderItemId, quantityReceived }] }` | `manage_inventory` |
+### Purchase orders & receiving
 
-- ≥1 line item required; **duplicate ids in one array are rejected (400)**.
-- A PO is **logging only** — creating one does **not** move stock, and there is no
-  status/workflow field.
+| Endpoint | Body |
+|---|---|
+| `POST /purchase-orders` | `{ supplierId, orderedAt?, notes?, items: [{ inventoryItemId, quantity, unitCost? }] }` |
+| `POST /purchase-orders/:poId/receipts` | `{ receivedAt?, notes?, items: [{ purchaseOrderItemId, quantityReceived }] }` |
+
+- At least one line item is required, and **duplicate ids within one array are
+  rejected (400)**.
+- **A PO is logging only** — creating one does *not* move stock, and there is no
+  status or workflow field. Do not build an approval flow against it.
 - **Receiving DOES increment `quantityOnHand`.** Multiple partial receipts per PO
-  are normal. `discrepancy` (`receivedQuantity − orderedQuantity`) is computed and
-  **never blocks** — over- and under-delivery are both accepted and reported.
-- Receipts are **immutable** — no PATCH, no DELETE. Correct a mistake via
-  `PATCH /inventory-items/:itemId` `{ quantityOnHand }`.
+  are normal and expected.
+- `discrepancy` (`receivedQuantity − orderedQuantity`) is computed and **never
+  blocks** — over- and under-delivery are both accepted and reported.
+- Receipts are **immutable**: no PATCH, no DELETE. Correct a mistake with
+  `PATCH /inventory-items/:itemId { quantityOnHand }`.
 
-### `wastage-logs`
-| Method | Path | Body |
-|---|---|---|
-| POST | `/` | `{ wastedAt?, notes?, items: [{ inventoryItemId, quantityWasted, reason, notes? }] }` |
-| GET | `/` | — |
-| GET | `/:wastageLogId` | — |
+### Wastage
 
-**Both reading and logging need only `view_inventory`** — so a Chef can log wastage.
+`POST /wastage-logs` — `{ wastedAt?, notes?, items: [{ inventoryItemId,
+quantityWasted, reason, notes? }] }`.
 `reason` ∈ `spoiled, damaged, expired, prep_error, other`.
-Wasting **more than current stock is rejected with 409** (deliberately unlike sale
-deduction, which is allowed to go negative). Immutable — no PATCH/DELETE.
 
----
+- **Reading *and* logging need only `view_inventory`** — so a Chef can log wastage
+  without `manage_inventory`. This is deliberate.
+- **Wasting more than current stock is rejected with 409.** Deliberately unlike sale
+  deduction, which is allowed to go negative.
+- Immutable — no PATCH, no DELETE.
 
-## 15. Health & Safety — `/api/shops/:shopId/inventory-scans`
+### Health & safety scans — `/api/shops/:shopId/inventory-scans`
 
-Gated on **`perform_health_safety`** — which Manager, Shift Manager, Server **and**
-Chef all hold by default. This is floor-staff work, not stock management, which is
-why the responses here deliberately **omit `quantityOnHand` / `lowStockThreshold`**:
-`view_inventory` data must not leak through this wider gate.
+Gated on **`perform_health_safety`**, which Manager, Shift Manager, Server **and**
+Chef all hold by default — expiry labelling is floor-staff work, not stock
+management. That is exactly why these responses **omit `quantityOnHand` and
+`lowStockThreshold`**: `view_inventory` data must not leak through the wider gate.
 
-| Method | Path | Body | Notes |
-|---|---|---|---|
-| POST | `/` | `{ sku, state: 'sealed' \| 'opened' }` | Looks up the item by SKU, picks `shelfLifeDays` or `shelfLifeOpenedDays`, computes `expiresOn = today + days`, writes an immutable row. **400 if that shelf life isn't configured** |
-| GET | `/` | — | All scans |
-| GET | `/latest` | — | One row per item — its **most recent** scan only. Items never scanned are absent |
-| GET | `/expired` | — | Items whose **latest** scan has passed `expiresOn` and has no resolution yet |
-| GET | `/:scanId` | — | |
-| POST | `/:scanId/print` | no body | 201. Each call is a **new print row** — reprinting is normal, not an error. Returns a narrow `{ label: { itemName, sku, expiresOn } }` |
-| GET | `/:scanId/prints` | — | Print history |
-| POST | `/:scanId/resolve` | `{ wastageLogId?, notes? }` | **400** if the scan hasn't expired; **409** if already resolved |
-| GET | `/:scanId/resolution` | — | |
+| Endpoint | Body | Notes |
+|---|---|---|
+| `POST /` | `{ sku, state: 'sealed' \| 'opened' }` | Looks the item up by SKU, picks `shelfLifeDays` or `shelfLifeOpenedDays` per `state`, computes `expiresOn = today + days`, writes an immutable row. **400 if that shelf life is not configured** |
+| `GET /` | — | Every scan |
+| `GET /latest` | — | One row per item — its **most recent** scan only. Items never scanned are absent |
+| `GET /expired` | — | Items whose **latest** scan has passed `expiresOn` with no resolution yet |
+| `GET /:scanId` | — | |
+| `POST /:scanId/print` | — | **201.** Each call writes a **new** print row — reprinting a damaged label is normal. Returns a narrow `{ label: { itemName, sku, expiresOn } }` |
+| `GET /:scanId/prints` | — | Print history |
+| `POST /:scanId/resolve` | `{ wastageLogId?, notes? }` | **400** if the scan has not expired; **409** if already resolved |
+| `GET /:scanId/resolution` | — | |
 
 **Flagging is flag-only — resolving never creates a wastage log or moves stock.**
-There is no per-batch quantity in this system, so there is no quantity the API could
-correctly guess. `wastageLogId` is optional: a flag closes either by pointing at a
-real 7.7 wastage log (validated to belong to this shop *and* to cover this scan's
-item) or by plain dismissal.
+There is no per-batch quantity anywhere in this system, so there is no quantity the
+API could correctly guess. `wastageLogId` is **optional**: a flag closes either by
+pointing at a real wastage log (validated to belong to this shop *and* to cover this
+scan's item) or by plain dismissal — false alarm, already used, mis-scanned.
 
-**Dates:** `expiresOn` is a calendar **date** string (`YYYY-MM-DD`), not a timestamp.
-Do **not** run it through `new Date().toISOString()` in the browser — you will land
-on the previous day for negative-offset users. Render it as a plain string.
-
-**"Today" is UTC** everywhere in this API. There is no per-shop timezone column.
+`GET /latest` and `GET /expired` are registered before `/:scanId`; the literal
+segments always win.
 
 ---
 
-## 16. Orders & till — `/api/shops/:shopId/orders`
+## 7. Till
 
-Gated on **`access_till`**, with three exceptions:
-- both discount routes and the refund route → **`apply_discount`**
-- the item-status route → **`view_kds`**
+Gated on **`access_till`**, with three exceptions: both discount routes and the
+refund route need **`apply_discount`**, and the item-status route needs
+**`view_kds`**.
 
-There is **no DELETE anywhere**. Cancel, void and refund are explicit, one-directional
-actions that create records; nothing is ever removed or reversed.
+### Create an order — `POST /api/shops/:shopId/orders`
 
-| Method | Path | Body | Perm |
-|---|---|---|---|
-| POST | `/` | create order (below) | `access_till` |
-| GET | `/` | — | `access_till` |
-| POST | `/sync` | offline sale (below) | `access_till` |
-| GET | `/:orderId` | — | `access_till` |
-| POST | `/:orderId/items` | `{ items: [...] }` | `access_till` |
-| PATCH | `/:orderId/discount` | discount (below) | `apply_discount` |
-| PATCH | `/:orderId/items/:orderItemId/discount` | discount | `apply_discount` |
-| POST | `/:orderId/cancel` | `{ wasPrepped: boolean, reason? }` | `access_till` |
-| POST | `/:orderId/items/:orderItemId/void` | `{ wasPrepped: boolean, reason? }` | `access_till` |
-| PATCH | `/:orderId/items/:orderItemId/status` | `{ status }` | **`view_kds`** |
-| POST | `/:orderId/payments` | payment (below) | `access_till` |
-| POST | `/:orderId/payments/:paymentId/refund` | `{ amount, reason? }` | `apply_discount` |
-
-### Create an order — `POST /`
 ```jsonc
 {
   "type": "dine_in" | "takeaway",
-  "tableNumber": "12",          // REQUIRED iff dine_in; REJECTED for takeaway
-  "customerName": "Sam",        // always optional
-  "items": [                    // at least one, always
+  "tableNumber": "12",        // REQUIRED iff dine_in; REJECTED for takeaway
+  "customerName": "Sam",      // always optional
+  "items": [                  // at least one, always
     {
-      "menuItemId": "uuid",     // exactly ONE of menuItemId / shopMenuItemId
+      "menuItemId": "uuid",   // exactly ONE of menuItemId / shopMenuItemId
       "shopMenuItemId": "uuid",
-      "variantId": "uuid",      // optional
+      "variantId": "uuid",    // optional
       "modifierOptionIds": ["uuid"],
-      "quantity": 2             // positive integer
+      "quantity": 2           // positive integer
     }
   ]
 }
 ```
+
 Returns **201** with the full order detail. There is no empty-order-then-add-items
-flow — header and lines are created together.
+flow; header and lines are created together.
 
-**Server-side rules the client should pre-enforce for UX:**
-- prices are resolved server-side from the shop's resolved menu — never send a price;
-- a disabled (86'd) item or variant is rejected;
-- **`minSelections`/`maxSelections` on every attached modifier group are enforced**,
-  including groups the customer never touched (0 selections fails a
-  `minSelections > 0` group);
-- `unitPrice` and each modifier's `priceDelta` are **snapshotted** on the order —
-  later menu price changes never alter a placed order.
+**Rules the client should pre-enforce for UX** (the server enforces them regardless):
 
-### Add items — `POST /:orderId/items`
-`{ "items": [ …same shape… ] }`. Requires the order to still be `open`.
+- **Never send a price.** Prices are resolved server-side from the shop's resolved
+  menu.
+- A disabled (86'd) item or variant is rejected.
+- **`minSelections` / `maxSelections` are enforced on every attached modifier
+  group** — including groups the customer never touched. Zero selections fails a
+  `minSelections > 0` group.
+- `unitPrice` and each modifier's `priceDelta` are **snapshotted**. Later menu price
+  changes never alter a placed order.
+- Item, variant and modifier **names are not snapshotted** — they are joined live at
+  read time, so renaming a menu item retroactively changes how old orders read.
 
-### Discounts — `PATCH …/discount` (order) and `PATCH …/items/:id/discount` (line)
-Set: `{ discountType: 'percentage' | 'fixed', discountValue: number > 0, reason? }`
-(percentage capped at 100). Clear: `{ discountType: null, discountValue: null }` —
-**both must be null together**.
+**Add items:** `POST /:orderId/items { items: [ …same shape… ] }`. Requires the
+order to still be `open`.
 
-- Order-level discount applies to the subtotal **after** all per-line discounts.
-- A `fixed` discount exceeding what it applies against is **rejected (400)** at
-  apply time.
+### Order lifecycle
+
+```
+open ──payment──▶ partially_paid ──payment──▶ paid
+ │                      │                      │
+ │                      └──────refund──────────┤
+ cancel                                        ▼
+ │                              partially_refunded ⇄ refunded
+ ▼
+cancelled
+```
+
+**The first payment LOCKS the order.** Status leaves `open`, and add-items,
+discounts, cancel and void all stop being accepted. **Once any refund is issued the
+order accepts no further payment** — a partially paid order that is then refunded
+cannot be topped up; settle it as a new order.
+
+### Discounts
+
+`PATCH /:orderId/discount` (order-level) and
+`PATCH /:orderId/items/:orderItemId/discount` (per line).
+
+- **Set:** `{ discountType: 'percentage' | 'fixed', discountValue: number > 0, reason? }`
+  — percentage capped at 100.
+- **Clear:** `{ discountType: null, discountValue: null }` — **both null together**.
+- The order-level discount applies to the subtotal **after** all per-line discounts.
+- A `fixed` discount exceeding what it applies against is **rejected (400)** at apply
+  time.
 - Discounting an **already-voided** line is rejected (400).
-- Requires `status === 'open'`.
+- Both require `status === 'open'`.
 
-### Cancel & void — `POST …/cancel`, `POST …/items/:id/void`
-`{ wasPrepped: boolean, reason? }` — **`wasPrepped` is required**, never defaulted;
-staff declare it explicitly, so the UI needs a deliberate yes/no control.
+### Cancel & void
 
-- Both require `status === 'open'`; both return the full order detail, **200**.
+`POST /:orderId/cancel` and `POST /:orderId/items/:orderItemId/void`, both
+`{ wasPrepped: boolean, reason? }` → **200** with the full order detail.
+
+- **`wasPrepped` is required and never defaulted** — staff declare it explicitly, so
+  the UI needs a deliberate yes/no control, not a silent default.
+- Both require `status === 'open'`. There is **no un-cancel and no un-void**.
 - **Voiding the last remaining active line is rejected (400)** — "cancel the order
   instead".
-- No un-cancel, no un-void.
-- Voided items **stay in the `items` array** (audit) but are excluded from every
-  total. Cancelling the order does **not** zero the totals — `status` and
-  `cancellation` are the authoritative "not charged" signal.
+- Voided items **stay in the `items` array** for audit but are excluded from every
+  total. **Render them struck through.**
+- **Cancelling does not zero the totals.** `status` and `cancellation` are the
+  authoritative "not charged" signal; the totals remain a record of what the order
+  contained.
 - **Neither creates a wastage log nor reverses inventory.** If stock was already
   deducted, it stays deducted.
 
-### Item prep status — `PATCH …/items/:orderItemId/status`
+### Item prep status — `PATCH /:orderId/items/:orderItemId/status`
+
 `{ "status": "pending" | "in_progress" | "ready" | "served" }` — **`view_kds`**, not
 `access_till`.
 
 - **Transitions are unrestricted** — forward, backward, or skipping ahead. A mis-tap
-  can be corrected.
+  can be corrected, deliberately unlike `order.status`.
 - Blocked only by a **cancelled order** (400) or an **already-voided item** (400).
   A **paid** order still accepts status changes — payment does not stop the kitchen.
-- Reaching **`ready`** (or `served`, the skip-ahead backstop) **fires the inventory
-  deduction**, exactly once per line ever, guarded by an atomic claim. Re-entering
-  the status never double-deducts. **This is not reversible** — a mis-tap onto
-  `ready` moves real stock, correctable only via a manual `quantityOnHand` PATCH or
-  a wastage entry. Consider a confirm step in the KDS UI.
-- **Returns the KDS-narrowed view (§17), not the full order detail** — no money.
+- **Returns the KDS-narrowed view ([§8](#8-kitchen-display)), not the full order
+  detail.** No money comes back from this route.
+
+> **Reaching `ready` — or `served`, the skip-ahead backstop — fires the inventory
+> deduction.** Exactly once per line ever, guarded by an atomic claim, so
+> re-entering the status never double-deducts. **It is not reversible**: a mis-tap
+> onto `ready` moves real stock, correctable only through a manual `quantityOnHand`
+> PATCH or a wastage entry. **Consider a confirm step in the KDS UI.**
 
 ### Payments — `POST /:orderId/payments`
-A **discriminated union on `method`**:
+
+A **discriminated union on `method`** — the required field differs by method:
+
 ```jsonc
 { "method": "cash", "amountTendered": 20.00 }   // MAY exceed the balance
 { "method": "card", "amount": 15.50 }           // may NOT exceed the balance
 ```
-- **Split/partial payment is simply calling this more than once.**
-- Cash credits `min(amountTendered, balanceDue)` and derives `change`. Card over the
-  balance is rejected (400) — there is nothing to give change from.
-- **The first payment LOCKS the order**: status leaves `open`, and add-items,
-  discounts, cancel and void all stop being accepted.
+
+- **Split and partial payment is simply calling this more than once.**
+- Cash credits `min(amountTendered, balanceDue)` and derives `change`. A card charge
+  over the balance is **rejected (400)** — there is nothing to give change from.
 - A **declined card returns 402** with **zero payment rows written** and the order
   untouched. Show the cashier the decline and let them retry or switch to cash.
-- Payments are immutable — no PATCH, no DELETE.
-- **Known edge case:** an order whose total is £0 (e.g. a 100% discount) cannot be
-  marked paid; a payment against it is rejected as "no outstanding balance", and it
-  stays `open`. Handle this in the UI.
+- Payments are **immutable** — no PATCH, no DELETE. Correcting one is a refund.
+
+> **Known edge case:** an order whose total is **£0** (e.g. a 100% discount) cannot
+> be marked paid — a payment against it is rejected as "no outstanding balance", and
+> it stays `open` forever. Handle this in the UI.
 
 ### Refunds — `POST /:orderId/payments/:paymentId/refund`
-`{ amount: number > 0, reason? }` → **201**.
-- A refund targets **one payment**, not the order — a card refund must reverse that
-  specific charge.
-- **Partial refunds = calling this more than once** against the same payment.
-- No `method` field — it is always the parent payment's.
-- Over-refunding beyond that payment's remaining refundable balance
-  (`netAmount`) is rejected (400).
-- A declined card refund returns **402** with zero rows written.
-- **Once any refund is issued, the order accepts no further payment.** A partially
-  paid order that is then refunded cannot be topped up — settle it as a new order.
 
-### Offline sync — `POST /sync`
-An idempotent queue of sales the till completed while offline.
+`{ amount: number > 0, reason? }` → **201**.
+
+- A refund targets **one payment**, not the order — a card refund must reverse that
+  specific charge's `providerReference`.
+- **Partial refunds are calling this more than once** against the same payment.
+- **No `method` field** — it is always the parent payment's, so you cannot refund a
+  card payment as cash.
+- Over-refunding beyond that payment's remaining refundable balance (its `netAmount`)
+  is **rejected (400)**.
+- A declined card refund returns **402** with zero rows written.
+
+### Offline sync — `POST /api/shops/:shopId/orders/sync`
+
+An idempotent queue of sales the till rang up **and took payment for** while offline.
+
 ```jsonc
 {
   "clientOrderId": "device-local-id",       // 1–200 chars, any format
@@ -703,7 +885,7 @@ An idempotent queue of sales the till completed while offline.
   "type": "dine_in" | "takeaway",
   "tableNumber": "…", "customerName": "…",
   "items": [{
-    "menuItemId" | "shopMenuItemId": "uuid",
+    "menuItemId": "uuid",                   // or shopMenuItemId
     "variantId": "uuid",
     "quantity": 1,
     "unitPrice": 8.50,                      // REQUIRED — what was actually charged
@@ -712,25 +894,41 @@ An idempotent queue of sales the till completed while offline.
   "payment": { "method": "cash", "amountTendered": 10 }   // REQUIRED
 }
 ```
-**Status codes are the whole contract here:**
-| Code | Meaning | What the till does |
+
+**The status codes are the whole contract:**
+
+| Code | Meaning | What the till should do |
 |---|---|---|
-| **201** | First sync — order created | Remove from queue |
-| **200** | Replay — same key, same payload; the original order is returned, nothing written | Remove from queue |
-| **409** | Same key, **different** payload | Do **not** retry blindly — this is a real key collision |
+| **201** | First sync — order created | Remove from the queue |
+| **200** | Replay — same key, same payload. The original order is returned, nothing written | Remove from the queue |
+| **409** | Same key, **different** payload | **Do not retry blindly** — this is a real key collision |
 | 400 | `platform`-mode card sale, or card over total | Cannot be synced as-is |
-| 404 | Item/variant/modifier not in this shop's menu (incl. soft-deleted) | Cannot be synced |
+| 404 | Item / variant / modifier not in this shop's menu (including soft-deleted) | Cannot be synced |
 
-- **Client-snapshotted prices are trusted as historical fact** — the server does not
-  re-price, does not check `isEnabled`, and does not re-enforce modifier min/max.
-- Payment scope: **cash always; card only when the company is in `own`
+- **Client-snapshotted prices are trusted as historical fact.** The cash is already
+  in the drawer at the price the customer was charged, so the server does **not**
+  re-price, does **not** check `isEnabled` (an item 86'd after the sale still syncs),
+  and does **not** re-enforce modifier min/max.
+- What *is* enforced is tenancy and referential integrity: the item must exist in
+  **this** shop's menu, and any variant or modifier option must genuinely belong to
+  that item.
+- **Payment scope: cash always; card only when the company is in `own`
   `cardPaymentMode`.** A `platform` card sale is **400** — our provider must be
-  reached live to authorise a card.
-- A synced order is locked exactly like a paid online order.
-- **It does NOT push to the KDS** — it's a historical record, not new kitchen work.
+  reached live to authorise a card, so a queued one could not legitimately exist.
+- `payment` is **required**. An offline order with nothing charged has no reason to
+  be queued; ring it up normally once connectivity returns.
+- A synced order is **locked exactly like a paid online order**.
+- **It does not push to the KDS** — it is a historical record of food already made,
+  not new kitchen work.
 - Rejections write nothing and leave the `clientOrderId` free to retry.
+- Normalise your payload the same way each time. The server hashes a canonical form,
+  so `10` vs `10.00` and `…T18:30:00.000Z` vs `…T19:30:00+01:00` correctly replay as
+  200 rather than colliding as 409.
 
-### Order response — detail (`GET /:orderId`, and every write's 200/201)
+### Order detail response
+
+Returned by `GET /:orderId` **and by every write's 200/201**.
+
 ```jsonc
 {
   "id", "shopId", "type", "tableNumber", "customerName",
@@ -739,14 +937,14 @@ An idempotent queue of sales the till completed while offline.
   "orderNumber": 42,          // per-shop, per-day, human-readable. null on legacy orders
   "orderDate": "2026-09-06",  // a DATE string, not a timestamp
 
-  "items": [{                 // includes voided lines (audit)
+  "items": [{                 // includes voided lines, for audit
     "id", "menuItemId", "shopMenuItemId", "variantId",
-    "itemName", "variantName",   // joined live, not snapshotted
+    "itemName", "variantName",   // joined live, NOT snapshotted
     "quantity", "unitPrice",     // unitPrice IS snapshotted
     "modifiers": [{ "id", "modifierOptionId", "name", "priceDelta" }],
     "lineTotal",                 // PRE-discount
     "discount": null | { type, value, reason, appliedByActorType, appliedByActorId, appliedAt },
-    "total",                     // post-discount
+    "total",                     // POST-discount
     "void": null | { voidedAt, voidedByActorType, voidedByActorId, reason, wasPrepped },
     "status": "pending"|"in_progress"|"ready"|"served",
     "statusUpdatedAt", "statusUpdatedByActorType", "statusUpdatedByActorId",
@@ -755,7 +953,7 @@ An idempotent queue of sales the till completed while offline.
 
   "subtotal",            // pre-discount, ACTIVE items only, VAT-INCLUSIVE
   "itemDiscountTotal",
-  "discount": null | {…},
+  "discount": null | { … },
   "discountAmount",
   "total",               // VAT-INCLUSIVE, floored at 0
 
@@ -767,67 +965,64 @@ An idempotent queue of sales the till completed while offline.
 
   "payments": [{
     "id", "method", "amount",
-    "amountTendered",   // cash only, else null
-    "change",           // derived, cash only, else null
-    "providerReference",// null for cash AND for 'own' card mode
+    "amountTendered",    // cash only, else null
+    "change",            // derived, cash only, else null
+    "providerReference", // null for cash AND for 'own' card mode
     "paidByActorType", "paidByActorId",
-    "refunds": [{ "id", "amount", "reason", "providerReference", "refundedByActorType", "refundedByActorId", "createdAt" }],
+    "refunds": [{ "id", "amount", "reason", "providerReference",
+                  "refundedByActorType", "refundedByActorId", "createdAt" }],
     "amountRefunded",
-    "netAmount",        // still refundable against THIS payment
+    "netAmount",         // still REFUNDABLE against this payment
     "createdAt"
   }],
-  "amountPaid",         // GROSS — every payment ever, ignoring refunds
+  "amountPaid",          // GROSS — every payment ever, ignoring refunds
   "amountRefunded",
   "netAmountPaid",
-  "balanceDue",         // total − netAmountPaid, floored at 0
+  "balanceDue",          // total − netAmountPaid, floored at 0
 
   "clientOrderId", "occurredAt",   // null unless offline-synced
   "createdAt", "updatedAt"
 }
 ```
 
-**Money semantics you must not re-derive client-side:**
-- `total` is **VAT-INCLUSIVE**. `vatAmount` is decomposed *out of* it, never added
-  on top. Nothing the customer pays changes because of VAT.
-- `vatRate` is **snapshotted at creation** — it never tracks later shop-settings
-  changes. `null` means "this order predates VAT calculation", not "0%".
-- `amountPaid` is gross; `netAmountPaid` nets off refunds; `balanceDue` uses the net.
-- `netAmount` **inside a payment** means "still refundable"; `vatExclusiveAmount`
-  **on the order** means "net of VAT". Two different things, deliberately two names.
-- One shop-level VAT rate applies to the whole order. Mixed-rate baskets (hot food
-  vs. zero-rated cold drink) are **not supported**.
+### Order list response — `GET /`
 
-### Order response — list (`GET /`)
 `{ id, shopId, type, tableNumber, customerName, status, createdByActorType,
 createdByActorId, itemCount, orderNumber, orderDate, clientOrderId, occurredAt,
-createdAt, updatedAt }` — **no items, no money at all.** Fetch the detail for totals.
+createdAt, updatedAt }`
+
+**No items and no money at all.** Fetch the detail for totals.
 
 ---
 
-## 17. Kitchen Display System — WebSocket
+## 8. Kitchen display
 
 ```
-GET wss://<host>/api/shops/:shopId/kds/socket
+GET wss://pos-api-52vj.onrender.com/api/shops/:shopId/kds/socket
 Authorization: Bearer <owner JWT | staff session token>
 ```
 
-- **Same `Authorization` header as REST** — deliberately not a query-string token.
-  Browsers cannot set headers on `new WebSocket(...)`, so a browser-based KDS needs
-  a native-style client or a proxy; the Android/iOS apps set the header directly.
-- Gated on **`view_kds`**. A refused handshake gets a **real HTTP response**
-  (401/403/404) with the standard error envelope — not a socket that opens and
-  immediately closes.
-- **Every live socket is re-authorized on a 30-second heartbeat.** Deactivation,
-  logout, session expiry, role change and a withdrawn override all disconnect the
-  socket within ~30s. It fails **closed** on revoked auth and **open** on an
-  infrastructure error. A connected KDS keeps its staff session alive.
-- The registry is **in-memory and per-process** — correct for the single Render
-  instance today; it would not fan out across multiple instances.
+- **The same `Authorization` header as REST** — deliberately not a query-string
+  token, so it stays out of any log that captures the request line.
+- Gated on **`view_kds`**.
+- A refused handshake gets a **real HTTP response** (401 / 403 / 404) with the
+  standard error envelope — not a socket that opens and immediately closes.
 
-**Server → client messages** (all JSON, all carry `at`):
+> **Browsers cannot set headers on `new WebSocket(...)`.** The Android/iOS KDS
+> clients set it directly. A browser-based KDS needs a proxy that injects the
+> header — there is no query-string fallback.
+
+**Re-authorization.** Every live socket is re-checked on a **30-second heartbeat**.
+Deactivation, logout, session expiry, role change and a withdrawn override all
+disconnect the socket within ~30s. It fails **closed** on revoked auth and **open**
+on an infrastructure error, so a database blip cannot black out every kitchen. A
+connected KDS keeps its staff session alive.
+
+**Server → client messages** — all JSON, all carrying `at`:
+
 | `type` | Payload |
 |---|---|
-| `kds.connected` | `{ shopId, actor: { type, id }, at }` — handshake authenticated **and** authorized |
+| `kds.connected` | `{ shopId, actor: { type, id }, at }` — authenticated **and** authorized |
 | `kds.unauthorized` | `{ statusCode, message, at }` — sent immediately before the server closes a revoked socket |
 | `order.created` | `{ shopId, order: <KDS view>, at }` |
 | `order.items_added` | same |
@@ -835,16 +1030,20 @@ Authorization: Bearer <owner JWT | staff session token>
 | `order.item_voided` | same |
 | `order.item_status_changed` | same — echoes the kitchen's own progress to every other screen in the shop |
 
-Close codes: `4401` (unauthenticated), `4403` (forbidden), `4404` (not found).
+Close codes: **4401** unauthenticated · **4403** forbidden · **4404** not found.
 
-**The KDS order view — an allow-list projection with every monetary field removed:**
+### The KDS order view
+
+An **allow-list projection** with every monetary field removed. Also the return
+shape of the item-status PATCH.
+
 ```jsonc
 {
   "id", "shopId",
-  "orderNumber", "orderDate",     // what the kitchen actually calls the ticket
+  "orderNumber", "orderDate",   // what the kitchen actually calls the ticket
   "type", "tableNumber", "customerName",
-  "status",                       // business/payment state — so the kitchen knows to stop
-  "kitchenStatus",                // DERIVED: lowest item status across non-voided lines
+  "status",                     // business/payment state — so the kitchen knows to stop
+  "kitchenStatus",              // DERIVED: lowest item status across non-voided lines
   "items": [{
     "id", "menuItemId", "shopMenuItemId", "variantId",
     "itemName", "variantName", "quantity",
@@ -855,61 +1054,153 @@ Close codes: `4401` (unauthenticated), `4403` (forbidden), `4404` (not found).
   "cancellation", "occurredAt", "createdAt", "updatedAt"
 }
 ```
-Absent by design: `subtotal, itemDiscountTotal, discount, discountAmount, total,
-vatRate, vatExclusiveAmount, vatAmount, payments, amountPaid, amountRefunded,
-netAmountPaid, balanceDue`, per-item `unitPrice/lineTotal/discount/total`, and
-per-modifier `priceDelta`.
 
-`kitchenStatus` is the **lowest** status across non-voided items — a ticket only
-reads `ready` once **every** line is. It is `null` only if nothing is active.
-Note the two separate names: `status` = payment state, `kitchenStatus` = prep state.
+**Absent by design:** `subtotal`, `itemDiscountTotal`, `discount`, `discountAmount`,
+`total`, `vatRate`, `vatExclusiveAmount`, `vatAmount`, `payments`, `amountPaid`,
+`amountRefunded`, `netAmountPaid`, `balanceDue`, per-item
+`unitPrice`/`lineTotal`/`discount`/`total`, and per-modifier `priceDelta`.
 
-**Reconnection:** there is no replay/backfill. On connect (or reconnect), fetch
-`GET /api/shops/:shopId/orders` and hydrate, then apply socket events on top.
+**Two different status fields, deliberately:**
+
+- `status` — the payment/business state of the order.
+- `kitchenStatus` — the **lowest** item status across non-voided lines, so a ticket
+  only reads `ready` once **every** line is, and voided lines cannot hold it back.
+  `null` if nothing is active.
+
+**Reconnection: there is no replay or backfill.** On connect and on every reconnect,
+fetch `GET /api/shops/:shopId/orders` to hydrate, then apply socket events on top.
+
+> **The connection registry is in-memory and per-process.** Correct for the single
+> production instance today, but it would not fan out across multiple instances if
+> the service is ever scaled.
 
 ---
 
-## 18. Stripe webhook (not for the frontend)
+## 9. Cross-cutting rules
 
-`POST /api/webhooks/stripe` — raw body, signature-verified, mounted before the JSON
-parser. Called by Stripe only. Idempotent via a `stripe_webhook_events` table.
+### Nullable fields — "explicit null clears, omitted leaves untouched"
 
----
+This governs **every** nullable field in the API: `lowStockThreshold`,
+`shelfLifeDays`, `shelfLifeOpenedDays`, `sku`, and both discount fields.
 
-## 19. Endpoint count by area
+A PATCH form must distinguish **three** states:
 
-| Area | REST endpoints |
+| Intent | Send |
 |---|---|
-| Health | 1 |
-| Owner auth + profile | 13 |
-| Staff auth | 2 |
-| Company + billing | 7 |
-| Master menu (categories, items, variants, modifiers, ingredients, recipes) | 40 |
-| Cross-shop inventory overview | 1 |
-| Shops + add-ons | 8 |
-| Staff + permission overrides | 9 |
-| Rota (shifts, swaps, attendance) | 15 |
-| Shop menu (resolved + overrides + local items) | 17 |
-| Inventory (items, supplier links, ingredient links) | 13 |
-| Suppliers | 5 |
-| Purchase orders + receiving | 5 |
-| Wastage | 3 |
-| Health & safety scans | 9 |
-| Orders / till / payments / refunds / sync / status | 12 |
-| Stripe webhook | 1 |
-| **Total REST** | **~161** |
-| WebSocket | 1 (`/api/shops/:shopId/kds/socket`) |
+| Leave untouched | **omit the key entirely** |
+| Clear the value | `null` |
+| Set the value | the value |
+
+An empty string or `undefined` is **not** a clear. Build **one** shared form helper
+for this and use it everywhere — this is the single most likely source of silent
+data bugs in the frontend. For discounts, `discountType` and `discountValue` must be
+null **together**.
+
+### Money — never re-derive it client-side
+
+The API is the one definition of every total, and they reconcile exactly by
+construction. Render what it returns. Never sum `items` yourself, never re-round,
+never compute a third amount from two the API already gives you.
+
+- **`total` is VAT-INCLUSIVE.** `vatAmount` is decomposed *out of* it, never added on
+  top. Nothing the customer pays changes because of VAT.
+- **`vatRate: null` means "this order predates VAT calculation"** — render it as
+  "not calculated", **never as 0%**. `0` is a real and different value.
+- `vatRate` is **snapshotted at creation** and never tracks later shop-settings
+  changes.
+- `lineTotal` is **pre**-discount; `item.total` is **post**-discount.
+- `amountPaid` is **gross**; `netAmountPaid` nets off refunds; `balanceDue` uses the
+  **net**.
+- **`payment.netAmount` = still refundable against that payment.
+  `order.vatExclusiveAmount` = net of VAT.** Two entirely different things, at two
+  nesting levels of the same response, deliberately given two names — do not
+  conflate them in a shared formatter.
+- Voided items stay in `items` but are excluded from every total.
+- **One shop-level VAT rate applies to the whole order.** Mixed-rate baskets — hot
+  food alongside a zero-rated cold drink — are **not supported**.
+
+### Dates — calendar strings are not instants
+
+| Field | Kind | Handling |
+|---|---|---|
+| `orderDate`, `expiresOn` | **calendar date** `YYYY-MM-DD` | **Render as a plain string** |
+| `createdAt`, `updatedAt`, `occurredAt`, `scannedAt` | real instants | Safe to localize |
+
+Running a calendar date through `new Date(...).toISOString()` shifts it a day for
+negative-offset users. This exact trap already bit the backend once.
+
+**"Today" is UTC throughout the API.** There is no per-shop timezone column
+anywhere, so order numbering resets at **midnight UTC**, not at close of trade —
+2am during BST. Do not localize it and imply otherwise.
+
+### What is snapshotted vs. joined live
+
+| Snapshotted at write time | Joined live at read time |
+|---|---|
+| `unitPrice`, modifier `priceDelta` | item, variant and modifier **names** |
+| `vatRate` | |
+
+So a renamed menu item retroactively changes how old orders read, but a re-priced
+one does not.
+
+### Immutability
+
+Receipts, wastage logs, scans, prints, resolutions, payments and refunds are all
+**immutable** — no PATCH, no DELETE anywhere. Corrections go through a *new* record
+or the resource's own manual endpoint, never a reversal. Build the UI accordingly:
+confirm-before-submit, not edit-after-the-fact.
 
 ---
 
-## 20. Not built yet — do not design around these
+## 10. Traps
 
-- **Module 11 — Loyalty/rewards**: program config, phone-based customer lookup,
-  earn/redeem, chain-wide points.
-- **Module 12 — Reporting**: sales, purchase/wastage, best/least-selling, custom
-  date ranges, PDF export, chain consolidated view. **`view_reports` exists as a
-  permission but nothing checks it yet.**
-- **Module 13 — Real payment provider**: card processing today goes through a
-  vendor-agnostic stub that touches no network in any environment. The
+Ranked by how much time each will cost you.
+
+1. **One token slot for both auth systems.** Owner JWT and staff session both ride
+   `Authorization: Bearer` and look identical on the wire. Separate storage keys,
+   separate contexts.
+2. **Concurrent refreshes log the user out.** Rotation invalidates the token you
+   sent. One in-flight refresh promise, always.
+3. **Gating UI on permission alone cripples the owner**, who bypasses the permission
+   system entirely. Branch on actor type first.
+4. **404 means "not found *or* not yours".** Never render "deleted".
+5. **`source: "master"` → `menuItemId`; `source: "local"` → `shopMenuItemId`.**
+   Exactly one, never both.
+6. **A `ready` tap moves real stock, irreversibly.** Confirm it.
+7. **A Chef cannot call the orders REST endpoints** — no `access_till`. Use the
+   socket and the status PATCH.
+8. **`GET /attendance` silently narrows** to your own records without `manage_rota`;
+   `GET /attendance/:recordId` **403s** instead. Do not show a staff filter to users
+   without the permission.
+9. **An owner cannot clock in** — 400, not 403.
+10. **Every rota route 400s when `rotaEnabled` is false.** Hide the section.
+11. **`kdsEnabled` and the `health_safety` add-on are NOT enforced by the API.**
+    `rotaEnabled` is. If the product intends those to gate access, the frontend must
+    do it.
+12. **A £0 order can never be marked paid** and stays `open` forever.
+13. **Unlinked ingredients silently skip deduction** with no error. Surface them as
+    a setup warning.
+14. **Offline sync 409 means a real key collision** — never retry it blindly.
+15. **Calendar dates are strings.** `toISOString()` will shift them a day.
+16. **Free-tier spin-down** drops every KDS socket after ~15 minutes idle. Reconnect
+    and re-hydrate.
+
+---
+
+## 11. Not built yet
+
+Do not design around these — they do not exist.
+
+- **Module 11 — Loyalty / rewards:** program config, phone-based customer lookup,
+  earn and redeem, chain-wide points.
+- **Module 12 — Reporting:** sales, purchase and wastage, best/least-selling, custom
+  date ranges, PDF export, chain consolidated view.
+  **`view_reports` exists as a permission but nothing checks it yet.**
+- **Module 13 — Real payment provider:** card processing today goes through a
+  vendor-agnostic stub that touches no network in **any** environment. The
   `{ success, providerReference, failureReason }` contract will not change when a
-  real SDK lands.
+  real SDK lands, so nothing on the frontend should need to.
+
+There is also **no transaction wrapper anywhere in the backend**, which is why
+several flows above are one-directional and correction happens through new records
+rather than edits. Expect that shape to continue.

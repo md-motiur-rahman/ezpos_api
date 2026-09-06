@@ -1,11 +1,26 @@
 # Render Blueprint - Infrastructure as Code.
 # Push this to GitHub, then in the Render Dashboard: New > Blueprint > select this repo.
-# Render will provision everything below automatically.
+#
+# NOTE: the live resources were created via Render's REST API rather than by
+# applying this Blueprint (the API has no "apply blueprint" endpoint, and the
+# dashboard was not available at the time). This file has been reconciled to
+# match what actually exists, so the two no longer disagree:
+#   database    pos-postgres  dpg-daentv6q1p3s73a5ke0g-a  (frankfurt, free)
+#   web service pos-api       srv-daenvfn40ujc7381dtb0    (frankfurt, free)
+#                             https://pos-api-52vj.onrender.com
 
 databases:
   - name: pos-postgres
     databaseName: pos_production
-    plan: basic-256mb # current Render Postgres tier naming; includes backups + point-in-time recovery
+    # FREE tier. Render EXPIRES a free database 30 days after creation and it
+    # has no backups - the live one expires 2026-10-06. Switch to
+    # basic-256mb (paid, includes backups + point-in-time recovery) before any
+    # real shop data goes in.
+    #
+    # Render also appends a suffix when the requested databaseName is already
+    # taken, so the live database is actually named pos_production_xgtn. That
+    # name is only ever read from DATABASE_URL, so nothing in the app cares.
+    plan: free
     postgresMajorVersion: '16' # matches the Postgres version used in local dev/test (see docker setup)
     region: frankfurt # EU region, chosen for GDPR-friendly hosting (see Module 0 planning)
 
@@ -13,12 +28,24 @@ services:
   - type: web
     name: pos-api
     runtime: node
-    plan: starter
-    region: frankfurt
+    plan: free
+    region: frankfurt # MUST match the database's region - an internal DATABASE_URL does not resolve across regions
     branch: master # must match the repo's actual default branch (origin/HEAD -> origin/master)
     autoDeployTrigger: commit
-    buildCommand: npm ci
-    preDeployCommand: npm run migrate:up # runs migrations after build, before the new version starts serving traffic
+    # --include=dev is load-bearing: NODE_ENV=production (set below) makes npm
+    # omit devDependencies, and node-pg-migrate - which preDeployCommand needs -
+    # is a devDependency. Without this the pre-deploy step below fails with
+    # "node-pg-migrate: not found" the moment the plan is upgraded.
+    buildCommand: npm ci --include=dev
+    # preDeployCommand REQUIRES A PAID INSTANCE TYPE - it is silently
+    # unavailable on `plan: free`, so it is commented out to match the live
+    # service. While on free, migrations must be run by hand against the
+    # database's EXTERNAL connection string (its ipAllowList blocks external
+    # connections by default, so add your IP, run, then remove it):
+    #   DATABASE_URL="<external-url>?sslmode=require" \
+    #     npx node-pg-migrate up --migrations-dir src/db/migrations
+    # Uncomment this the moment the plan moves to starter or above.
+    # preDeployCommand: npm run migrate:up
     startCommand: npm start
     healthCheckPath: /health
     envVars:
@@ -38,12 +65,12 @@ services:
         sync: false
       # PORT is not set here - Render injects it automatically for web services,
       # and our app already reads it via process.env.PORT (see src/config/env.js).
+      # Setting it explicitly (as the old hand-made service did, to 4000)
+      # overrides Render's injected value and is a needless way to break routing.
       #
       # EVERY var below is REQUIRED by src/config/env.js's requiredVars, which
       # throws at boot if any one is missing - so a Blueprint deploy without
-      # them crash-loops on startup rather than failing gracefully. They were
-      # left as a "future modules will add these" TODO and never filled in as
-      # Modules 1 and 3 actually shipped.
+      # them crash-loops on startup rather than failing gracefully.
       #
       # All are `sync: false`: Render prompts for the value on first deploy and
       # stores it in the dashboard, so no secret is ever committed to this repo.

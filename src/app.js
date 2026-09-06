@@ -57,14 +57,58 @@ const app = express();
 app.set('trust proxy', 1);
 
 // --- CORS ---
+
+/**
+ * Vercel gives every preview deployment its OWN hostname
+ * (`<project>-git-<branch>-<scope>.vercel.app`), and it changes on each
+ * deploy - so an exact-match allow-list can never contain them, and every
+ * preview would be blocked by CORS. That matters in practice: previews are
+ * how work in progress actually gets shown to someone before it is merged.
+ *
+ * `CORS_ALLOWED_PREVIEW_SUFFIX` opts into matching by SUFFIX instead
+ * (e.g. `.vercel.app`), on top of the exact list. Deliberately opt-in and
+ * empty by default: this is a genuine widening of who may call the API from a
+ * browser, so it must be a decision someone makes, not a default. Set it to
+ * your own preview domain and nothing else.
+ *
+ * Still strict about HOW it matches - `https://` scheme required, and the
+ * suffix must be preceded by at least one more label. Without the scheme
+ * check `http://evil.vercel.app` would pass; without the label check a
+ * hostile `evil-vercel.app` registration would match a bare `vercel.app`
+ * suffix. Origins are compared lowercase because a browser may vary case in
+ * the host.
+ */
+export function isAllowedPreviewOrigin(origin, suffix) {
+  if (!suffix) {
+    return false;
+  }
+  let url;
+  try {
+    url = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== 'https:') {
+    return false;
+  }
+  const host = url.hostname.toLowerCase();
+  const normalized = suffix.toLowerCase().startsWith('.')
+    ? suffix.toLowerCase()
+    : `.${suffix.toLowerCase()}`;
+  return host.endsWith(normalized) && host.length > normalized.length;
+}
+
 const corsOptions = {
   origin(origin, callback) {
-    const { corsAllowedOrigins, isDevelopment } = config.env;
+    const { corsAllowedOrigins, corsAllowedPreviewSuffix, isDevelopment } = config.env;
     if (!origin) return callback(null, true);
     if (isDevelopment && corsAllowedOrigins.length === 0) {
       return callback(null, true);
     }
     if (corsAllowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    if (isAllowedPreviewOrigin(origin, corsAllowedPreviewSuffix)) {
       return callback(null, true);
     }
     return callback(new AppError('Not allowed by CORS', 403));

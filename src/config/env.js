@@ -47,6 +47,13 @@ const corsAllowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
   .map((origin) => origin.trim())
   .filter(Boolean);
 
+// Optional, opt-in, empty by default. A single domain suffix (e.g.
+// '.vercel.app') whose subdomains may call this API from a browser, so that
+// Vercel PREVIEW deployments - which get a fresh hostname on every deploy and
+// therefore can never appear in the exact list above - are not all blocked by
+// CORS. See isAllowedPreviewOrigin in app.js for how strictly it is matched.
+const corsAllowedPreviewSuffix = (process.env.CORS_ALLOWED_PREVIEW_SUFFIX || '').trim();
+
 export const env = {
   nodeEnv: process.env.NODE_ENV,
   port: Number(process.env.PORT),
@@ -55,6 +62,7 @@ export const env = {
   isStaging: process.env.NODE_ENV === 'staging',
   isTest: process.env.NODE_ENV === 'test',
   corsAllowedOrigins,
+  corsAllowedPreviewSuffix,
   databaseUrl: process.env.DATABASE_URL,
   resendApiKey: process.env.RESEND_API_KEY,
   emailFrom: process.env.EMAIL_FROM,

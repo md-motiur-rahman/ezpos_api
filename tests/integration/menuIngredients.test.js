@@ -25,10 +25,27 @@ function headerFor(userId) {
   return `Bearer ${signAccessToken({ id: userId, email: 'irrelevant@example.com' })}`;
 }
 
+/**
+ * Setup results are ASSERTED, not assumed.
+ *
+ * A test here ("PATCH quantity on an ingredient that is not attached returns
+ * 404") failed once under full-suite load with `400 !== 404`, because the
+ * company lookup had returned 404 several requests earlier and every id after
+ * it was `undefined` - so the request under test went to
+ * `/menu-items/undefined/ingredients/undefined` and was rejected by param
+ * validation instead of ever reaching the code being tested. The assertion
+ * that finally fired named neither the real failure nor where it happened.
+ *
+ * Root cause is still UNKNOWN: rate limiting was ruled out (the failure
+ * reproduced with the global limiter raised to 1,000,000), as were 500s,
+ * pool/connection timeouts, and destructive cleanup in another file. These
+ * checks do not fix it - they make the next occurrence say what actually
+ * broke, at the point it breaks.
+ */
 async function setupOwnerWithCompany() {
   const userId = await insertUser();
   const header = headerFor(userId);
-  await request(app)
+  const created = await request(app)
     .post('/api/companies')
     .set('Authorization', header)
     .send({
@@ -39,6 +56,7 @@ async function setupOwnerWithCompany() {
       country: 'UK',
       phone: '02012345678',
     });
+  assert.equal(created.status, 201, `company setup failed: ${JSON.stringify(created.body)}`);
   return { userId, header };
 }
 
@@ -47,10 +65,12 @@ async function createCategoryAndItem(header) {
     .post('/api/companies/mine/menu-categories')
     .set('Authorization', header)
     .send({ name: 'Mains' });
+  assert.equal(category.status, 201, `category setup failed: ${JSON.stringify(category.body)}`);
   const item = await request(app)
     .post('/api/companies/mine/menu-items')
     .set('Authorization', header)
     .send({ categoryId: category.body.id, name: 'Chicken Wrap', price: 5.99 });
+  assert.equal(item.status, 201, `menu item setup failed: ${JSON.stringify(item.body)}`);
   return item.body;
 }
 

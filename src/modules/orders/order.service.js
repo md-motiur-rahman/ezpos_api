@@ -8,6 +8,7 @@ import * as shopRepository from '../shop/shop.repository.js';
 import * as companyRepository from '../company/company.repository.js';
 import * as paymentProvider from './paymentProvider.js';
 import { broadcastOrderEvent, KDS_EVENTS } from '../kds/kdsSocket.js';
+import { toKdsOrderView } from '../kds/kdsOrderView.js';
 import { deductInventoryForSale } from '../inventory/saleDeduction.service.js';
 import { logger } from '../../utils/logger.js';
 import {
@@ -31,6 +32,55 @@ function toMoney(value) {
 /** Money is always settled to 2dp - kills IEEE-754 noise (0.1 + 0.2 = 0.30000000000000004) before it reaches a response or the DB. */
 function roundMoney(value) {
   return Number(value.toFixed(2));
+}
+
+/**
+ * The calendar day an order number is drawn from, as 'YYYY-MM-DD'.
+ *
+ * UTC, deliberately, and this is a real limitation worth stating rather than
+ * hiding: there is no per-shop timezone anywhere in this schema, so "day"
+ * cannot currently mean the shop's local day. It follows 8.4's existing
+ * todayUtcDateString precedent so every date-keyed feature in this project
+ * agrees on what a day is. The consequence for a late-night venue is that
+ * numbering resets at midnight UTC (2am during British Summer Time) rather
+ * than at close of trade. Fixing that properly needs either a shops.timezone
+ * column or a configurable business-day cutoff hour - neither exists, and
+ * inventing one here would be guessing at a policy nobody has set.
+ *
+ * Built from UTC getters rather than .toISOString().slice(0,10) purely for
+ * symmetry with the 8.2 lesson about date rendering; for a UTC instant the
+ * two agree, but the explicit form can't be mis-read as the buggy pattern.
+ */
+function utcDateString(date) {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(date.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Renders a `date` column back out as 'YYYY-MM-DD'.
+ *
+ * THE 8.2 TRAP, and the reason this exists rather than calling
+ * .toISOString(): `pg` parses a `date` column into a JS Date at LOCAL
+ * midnight, not UTC midnight. The server runs Europe/London, so during BST a
+ * stored '2026-08-23' comes back as 2026-08-22T23:00:00Z and
+ * .toISOString().slice(0,10) would silently render the PREVIOUS day. Local
+ * getters are correct for a `date` (a calendar day with no timezone of its
+ * own); UTC getters are correct for a `timestamptz` (a real instant). This
+ * one is a date.
+ */
+function formatDateColumn(value) {
+  if (!value) {
+    return null;
+  }
+  if (typeof value === 'string') {
+    return value.slice(0, 10);
+  }
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 /**
@@ -124,6 +174,11 @@ function toListResponse(order) {
     createdByActorType: order.created_by_actor_type,
     createdByActorId: order.created_by_actor_id,
     itemCount: order.item_count,
+    // Human-readable per-shop daily number. Null for every order created
+    // before this shipped - an honest "this order never had one" rather than
+    // a fabricated value, same contract as clientOrderId/vatRate.
+    orderNumber: order.order_number ?? null,
+    orderDate: formatDateColumn(order.order_date),
     // New in 9.7 - both null for every order created through the normal
     // online flow, so this list's existing shape is unchanged for them.
     // Present here (and not only on the detail response) so a till coming
@@ -380,6 +435,10 @@ function toDetailResponse(order, items, payments = []) {
     status: order.status,
     createdByActorType: order.created_by_actor_type,
     createdByActorId: order.created_by_actor_id,
+    // Human-readable per-shop daily number (see allocateOrderNumber). Null
+    // for every order created before this shipped.
+    orderNumber: order.order_number ?? null,
+    orderDate: formatDateColumn(order.order_date),
     // Full list, including any voided lines (audit trail) - only the
     // totals below exclude them.
     items,
@@ -614,6 +673,15 @@ export async function createOrder(actor, shopId, data) {
   // never re-derived later from the shop's current settings.
   const shop = await shopRepository.findActiveShopById(shopId);
 
+  // Allocated AFTER every validation above and immediately before the insert,
+  // deliberately: a rejected order must not consume a number, or staff would
+  // see unexplained gaps in what they read as a contiguous daily count. A
+  // number can still be burned if the insert itself fails afterwards - that
+  // is unavoidable without a transaction (this project has none) and is a
+  // gap, never a duplicate, which is the safe direction.
+  const orderDate = utcDateString(new Date());
+  const orderNumber = await orderRepository.allocateOrderNumber(shopId, orderDate);
+
   const order = await orderRepository.createOrder(shopId, {
     type: data.type,
     tableNumber: data.tableNumber,
@@ -621,6 +689,8 @@ export async function createOrder(actor, shopId, data) {
     createdByActorType: actor.type,
     createdByActorId: actor.id,
     vatRate: resolveVatRate(shop),
+    orderNumber,
+    orderDate,
   });
 
   await writeResolvedItems(order.id, resolvedLines);
@@ -987,8 +1057,16 @@ export async function setOrderItemStatus(actor, shopId, orderId, orderItemId, da
   // connected KDS screen for this shop (an expo screen, a second station)
   // stays in sync. Same best-effort broadcastOrderEvent as 10.1's four
   // events - never throws, never blocks this function's own success.
+  // (broadcastOrderEvent narrows the order itself, see kdsOrderView.js.)
   broadcastOrderEvent(shopId, KDS_EVENTS.ITEM_STATUS_CHANGED, detail);
-  return detail;
+
+  // Returns the KDS-SAFE view, not the full detail. This route is the one
+  // order endpoint gated on VIEW_KDS rather than ACCESS_TILL, so its caller
+  // may well be a Chef - who is 403'd from GET /orders/:id and must not
+  // receive the payment ledger, discounts or VAT breakdown here instead.
+  // See kdsOrderView.js. A Manager (who holds both permissions) can still
+  // fetch the full detail through the ACCESS_TILL-gated read.
+  return toKdsOrderView(detail);
 }
 
 /**
@@ -1514,6 +1592,34 @@ export async function syncOfflineOrder(actor, shopId, data) {
 
   const syncPayloadHash = hashSyncPayload(shopId, data);
 
+  // Pre-check BEFORE allocating a number. A till with flaky connectivity
+  // re-sends the same queued sale repeatedly, and that is the expected happy
+  // path here - allocating first would burn a fresh order number on every
+  // retry, tearing visible gaps through the day's sequence. Answering the
+  // replay from this lookup costs one query and consumes nothing.
+  //
+  // This does NOT replace the post-insert duplicate handling below: two
+  // genuinely simultaneous first-syncs of the same key can both pass this
+  // check, and the unique index is what still guarantees only one order
+  // exists. The loser of that race burns one number - rare, a gap not a
+  // duplicate, and the same narrow window 9.7 already documents.
+  const alreadySynced = await orderRepository.findOrderByClientOrderId(
+    shopId,
+    data.clientOrderId
+  );
+  if (alreadySynced) {
+    if (alreadySynced.sync_payload_hash !== syncPayloadHash) {
+      throw new AppError('This clientOrderId has already been used for a different order', 409);
+    }
+    return { order: await fetchOrderDetail(shopId, alreadySynced.id), created: false };
+  }
+
+  // Numbered against the day the sale ACTUALLY happened (occurredAt), not the
+  // day it reached the server - a sale rung up on Friday belongs in Friday's
+  // sequence even if the till only reconnects on Monday.
+  const orderDate = utcDateString(new Date(data.occurredAt));
+  const orderNumber = await orderRepository.allocateOrderNumber(shopId, orderDate);
+
   const order = await orderRepository.createSyncedOrder(shopId, {
     type: data.type,
     tableNumber: data.tableNumber,
@@ -1524,6 +1630,8 @@ export async function syncOfflineOrder(actor, shopId, data) {
     occurredAt: data.occurredAt,
     syncPayloadHash,
     vatRate: resolveVatRate(shop),
+    orderNumber,
+    orderDate,
   });
 
   // No row came back: this clientOrderId is already synced for this shop.

@@ -623,3 +623,164 @@ test('a closed socket is removed from the registry and stops receiving', async (
     await stopServer(ctx);
   }
 });
+
+// --- The KDS payload carries no monetary data (permission-leak fix) ---
+
+/**
+ * The KDS is gated on VIEW_KDS; order data over REST is gated on ACCESS_TILL.
+ * The Chef holds the first and deliberately not the second, so the pushed
+ * payload must not carry what GET /orders/:id would 403 them for.
+ */
+test('a pushed order carries what the kitchen needs but none of the money', async () => {
+  const ctx = await startServer();
+  const { header, shopId } = await setupOwnerWithShop();
+  const itemId = await createMenuItem(header, 'Burger', 10);
+  let ws;
+  try {
+    ws = await connectReady(ctx.port, shopId, header);
+    const pushed = nextMessage(ws);
+
+    const created = await createOrder(header, shopId, itemId);
+    assert.equal(created.status, 201);
+
+    const event = await pushed;
+    assert.equal(event.type, 'order.created');
+
+    // Everything a kitchen screen actually needs.
+    assert.equal(event.order.id, created.body.id);
+    assert.equal(event.order.type, 'takeaway');
+    assert.equal(event.order.items.length, 1);
+    assert.equal(event.order.items[0].itemName, 'Burger');
+    assert.equal(event.order.items[0].quantity, 1);
+    assert.equal(event.order.items[0].status, 'pending');
+
+    // ...and none of the money, at any nesting level.
+    assert.equal(event.order.subtotal, undefined);
+    assert.equal(event.order.total, undefined);
+    assert.equal(event.order.payments, undefined);
+    assert.equal(event.order.balanceDue, undefined);
+    assert.equal(event.order.vatAmount, undefined);
+    assert.equal(event.order.discount, undefined);
+    assert.equal(event.order.items[0].unitPrice, undefined);
+    assert.equal(event.order.items[0].lineTotal, undefined);
+
+    // A blunt catch-all, so a money field added to toDetailResponse later
+    // cannot slip through unnoticed.
+    const raw = JSON.stringify(event);
+    for (const banned of ['unitPrice', 'lineTotal', 'subtotal', 'balanceDue', 'amountPaid', 'vatAmount', 'priceDelta']) {
+      assert.equal(raw.includes(banned), false, `"${banned}" must not appear in a KDS payload`);
+    }
+  } finally {
+    closeQuietly(ws);
+    await stopServer(ctx);
+  }
+});
+
+// --- Re-authorization of already-connected sockets ---
+
+test('a socket whose staff member is deactivated is closed on the next sweep', async () => {
+  const ctx = await startServer();
+  const { header, shopId } = await setupOwnerWithShop();
+  const { revalidateConnections } = await import('../../src/modules/kds/kdsSocket.js');
+  const chef = await insertStaff(shopId, 'chef');
+  const chefHeader = await staffHeaderFor(shopId, chef.staffIdCode);
+  let ws;
+  try {
+    ws = await connectReady(ctx.port, shopId, chefHeader);
+
+    // Deactivate them mid-connection (what staff.service.js's deactivate does).
+    await query(`UPDATE staff SET deleted_at = now() WHERE id = $1`, [chef.id]);
+
+    const notice = nextMessage(ws);
+    await revalidateConnections(ctx.kds.wss);
+
+    const event = await notice;
+    assert.equal(event.type, 'kds.unauthorized');
+    assert.equal(event.statusCode, 401);
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(ws.readyState, WebSocket.CLOSED, 'the socket must actually be closed');
+  } finally {
+    closeQuietly(ws);
+    await stopServer(ctx);
+  }
+});
+
+test('a socket whose role loses VIEW_KDS is closed on the next sweep', async () => {
+  const ctx = await startServer();
+  const { header, shopId } = await setupOwnerWithShop();
+  const { revalidateConnections } = await import('../../src/modules/kds/kdsSocket.js');
+  const chef = await insertStaff(shopId, 'chef');
+  const chefHeader = await staffHeaderFor(shopId, chef.staffIdCode);
+  let ws;
+  try {
+    ws = await connectReady(ctx.port, shopId, chefHeader);
+
+    // Server has ACCESS_TILL but deliberately NOT VIEW_KDS.
+    await query(`UPDATE staff SET role = 'server' WHERE id = $1`, [chef.id]);
+
+    const notice = nextMessage(ws);
+    await revalidateConnections(ctx.kds.wss);
+
+    const event = await notice;
+    assert.equal(event.type, 'kds.unauthorized');
+    assert.equal(event.statusCode, 403);
+  } finally {
+    closeQuietly(ws);
+    await stopServer(ctx);
+  }
+});
+
+test('a still-authorized socket survives the sweep untouched', async () => {
+  const ctx = await startServer();
+  const { header, shopId } = await setupOwnerWithShop();
+  const itemId = await createMenuItem(header, 'Burger', 10);
+  const { revalidateConnections } = await import('../../src/modules/kds/kdsSocket.js');
+  const chef = await insertStaff(shopId, 'chef');
+  const chefHeader = await staffHeaderFor(shopId, chef.staffIdCode);
+  let ws;
+  try {
+    ws = await connectReady(ctx.port, shopId, chefHeader);
+
+    // Nothing revoked - two sweeps must be a complete no-op.
+    await revalidateConnections(ctx.kds.wss);
+    await revalidateConnections(ctx.kds.wss);
+    await expectNoMessage(ws);
+    assert.equal(ws.readyState, WebSocket.OPEN, 'an authorized socket must stay open');
+
+    // And it still works afterwards.
+    const pushed = nextMessage(ws);
+    const created = await createOrder(header, shopId, itemId);
+    assert.equal(created.status, 201);
+    assert.equal((await pushed).type, 'order.created');
+  } finally {
+    closeQuietly(ws);
+    await stopServer(ctx);
+  }
+});
+
+test('a pushed ticket carries the order number and the derived kitchen status', async () => {
+  const ctx = await startServer();
+  const { header, shopId } = await setupOwnerWithShop();
+  const itemId = await createMenuItem(header, 'Burger', 10);
+  let ws;
+  try {
+    ws = await connectReady(ctx.port, shopId, header);
+    const pushed = nextMessage(ws);
+
+    const created = await createOrder(header, shopId, itemId);
+    assert.equal(created.status, 201);
+
+    const event = await pushed;
+    // A UUID is unusable on a wall-mounted screen - the kitchen needs the
+    // number staff actually call out.
+    assert.equal(event.order.orderNumber, created.body.orderNumber);
+    assert.ok(event.order.orderNumber, 'the KDS must receive a real order number');
+    assert.equal(event.order.orderDate, new Date().toISOString().slice(0, 10));
+    // Ticket-level roll-up, derived from the item statuses.
+    assert.equal(event.order.kitchenStatus, 'pending');
+  } finally {
+    closeQuietly(ws);
+    await stopServer(ctx);
+  }
+});

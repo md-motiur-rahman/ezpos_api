@@ -275,9 +275,20 @@ test('a status update for a non-existent item returns 404', async () => {
   assert.equal(res.status, 404);
 });
 
-// --- Response contract is purely additive ---
+// --- Response contract ---
 
-test('every pre-existing field on an untouched item is unaffected by a status change', async () => {
+/**
+ * REVISED after the 10.2 permission-leak fix. This test previously asserted
+ * that this endpoint returned the FULL order detail unchanged (unitPrice,
+ * lineTotal, subtotal, total). That was the leak: this route is the one order
+ * endpoint gated on VIEW_KDS rather than ACCESS_TILL, so a Chef - who is
+ * deliberately 403'd from GET /orders/:id - was being handed the order's
+ * money through it anyway. It now returns the KDS-safe view
+ * (kdsOrderView.js), so the assertions below check the two properties that
+ * actually matter: the kitchen still gets everything it needs to cook, and
+ * none of the money comes with it.
+ */
+test('a status change returns everything the kitchen needs, with no monetary data', async () => {
   const { header, shopId } = await setupOwnerWithShop();
   const { order } = await tenPoundOrder(header, shopId);
   const itemId = order.items[0].id;
@@ -286,13 +297,59 @@ test('every pre-existing field on an untouched item is unaffected by a status ch
   const res = await setStatus(header, shopId, order.id, itemId, 'ready');
   const after = res.body.items.find((i) => i.id === itemId);
 
-  assert.equal(after.unitPrice, before.unitPrice);
-  assert.equal(after.lineTotal, before.lineTotal);
-  assert.equal(after.total, before.total);
-  assert.equal(after.discount, before.discount);
-  assert.equal(after.void, before.void);
-  assert.equal(res.body.subtotal, order.subtotal);
-  assert.equal(res.body.total, order.total);
+  // What the kitchen needs is intact and still matches the created order.
+  assert.equal(after.itemName, before.itemName);
+  assert.equal(after.quantity, before.quantity);
+  assert.equal(after.status, 'ready');
+  assert.equal(after.void, null);
+  assert.equal(res.body.id, order.id);
+  assert.equal(res.body.type, order.type);
+  assert.equal(res.body.status, order.status);
+
+  // No money, at any nesting level.
+  assert.equal(after.unitPrice, undefined);
+  assert.equal(after.lineTotal, undefined);
+  assert.equal(after.total, undefined);
+  assert.equal(after.discount, undefined);
+  assert.equal(res.body.subtotal, undefined);
+  assert.equal(res.body.total, undefined);
+  assert.equal(res.body.payments, undefined);
+  assert.equal(res.body.balanceDue, undefined);
+  assert.equal(res.body.vatAmount, undefined);
+});
+
+test('a Chef cannot reach the order payment ledger through the status endpoint', async () => {
+  const { header, shopId } = await setupOwnerWithShop();
+  const { order } = await tenPoundOrder(header, shopId);
+  const chef = await insertStaff(shopId, 'chef');
+  const chefHeader = await staffHeaderFor(shopId, chef.staffIdCode);
+
+  // Pay the order first, so there is a real payment record to leak.
+  const paid = await request(app)
+    .post(`/api/shops/${shopId}/orders/${order.id}/payments`)
+    .set('Authorization', header)
+    .send({ method: 'cash', amountTendered: 20 });
+  assert.equal(paid.status, 201);
+  assert.equal(paid.body.payments.length, 1, 'the payment must exist to be leakable');
+
+  // The Chef is 403'd from the ACCESS_TILL-gated read...
+  const denied = await request(app)
+    .get(`/api/shops/${shopId}/orders/${order.id}`)
+    .set('Authorization', chefHeader);
+  assert.equal(denied.status, 403);
+
+  // ...so the VIEW_KDS-gated route must not hand them the same data instead.
+  const res = await setStatus(chefHeader, shopId, order.id, order.items[0].id, 'ready');
+  assert.equal(res.status, 200);
+  assert.equal(res.body.payments, undefined, 'payment ledger must not leak via VIEW_KDS');
+  assert.equal(res.body.amountPaid, undefined);
+  assert.equal(res.body.balanceDue, undefined);
+  assert.equal(res.body.total, undefined);
+  assert.equal(
+    JSON.stringify(res.body).includes('amountTendered'),
+    false,
+    'no payment field may appear anywhere in the payload'
+  );
 });
 
 // --- Permissions ---
@@ -375,4 +432,108 @@ test('a status change pushes order.item_status_changed to a connected KDS', asyn
     kds.close();
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+// --- Derived ticket-level kitchen status (KDS roll-up) ---
+
+/**
+ * The Chef still updates items one at a time; kitchenStatus is the ticket-level
+ * roll-up the KDS shows. It is the LOWEST status across active items - a ticket
+ * is only 'ready' once every line is, otherwise the kitchen would be told a
+ * ticket is done while food is still on the pass.
+ */
+async function twoItemOrder(header, shopId) {
+  const categoryId = await createCategory(header, 'Mains');
+  const burgerId = await createMenuItem(header, categoryId, 'Burger', 10);
+  const friesId = await createMenuItem(header, categoryId, 'Fries', 3);
+  const order = await createOrder(header, shopId, {
+    type: 'takeaway',
+    items: [
+      { menuItemId: burgerId, quantity: 1 },
+      { menuItemId: friesId, quantity: 1 },
+    ],
+  });
+  return {
+    order,
+    burgerItemId: order.items.find((i) => i.menuItemId === burgerId).id,
+    friesItemId: order.items.find((i) => i.menuItemId === friesId).id,
+  };
+}
+
+test('a brand-new ticket rolls up to pending, and carries the order number', async () => {
+  const { header, shopId } = await setupOwnerWithShop();
+  const { order, burgerItemId } = await twoItemOrder(header, shopId);
+
+  const res = await setStatus(header, shopId, order.id, burgerItemId, 'pending');
+
+  assert.equal(res.body.kitchenStatus, 'pending');
+  assert.equal(res.body.orderNumber, order.orderNumber);
+  assert.ok(res.body.orderNumber, 'the KDS must get a human-readable number, not just a UUID');
+});
+
+test('one item moving forward pulls the ticket to in_progress, but not to ready', async () => {
+  const { header, shopId } = await setupOwnerWithShop();
+  const { order, burgerItemId } = await twoItemOrder(header, shopId);
+
+  const res = await setStatus(header, shopId, order.id, burgerItemId, 'ready');
+
+  // Burger ready, fries still pending -> the TICKET is not ready.
+  assert.equal(res.body.kitchenStatus, 'pending', 'the slowest line governs the ticket');
+});
+
+test('a ticket reads ready only once every line is ready', async () => {
+  const { header, shopId } = await setupOwnerWithShop();
+  const { order, burgerItemId, friesItemId } = await twoItemOrder(header, shopId);
+
+  await setStatus(header, shopId, order.id, burgerItemId, 'ready');
+  const res = await setStatus(header, shopId, order.id, friesItemId, 'ready');
+
+  assert.equal(res.body.kitchenStatus, 'ready');
+});
+
+test('a ticket reads in_progress while any line is being worked', async () => {
+  const { header, shopId } = await setupOwnerWithShop();
+  const { order, burgerItemId, friesItemId } = await twoItemOrder(header, shopId);
+
+  await setStatus(header, shopId, order.id, burgerItemId, 'served');
+  const res = await setStatus(header, shopId, order.id, friesItemId, 'in_progress');
+
+  assert.equal(res.body.kitchenStatus, 'in_progress');
+});
+
+test('a voided line does not hold the ticket back', async () => {
+  const { header, shopId } = await setupOwnerWithShop();
+  const { order, burgerItemId, friesItemId } = await twoItemOrder(header, shopId);
+
+  // Fries voided while still pending; burger ready. The ticket is ready,
+  // because nobody is making the fries any more.
+  const voided = await request(app)
+    .post(`/api/shops/${shopId}/orders/${order.id}/items/${friesItemId}/void`)
+    .set('Authorization', header)
+    .send({ wasPrepped: false });
+  assert.equal(voided.status, 200);
+
+  const res = await setStatus(header, shopId, order.id, burgerItemId, 'ready');
+  assert.equal(res.body.kitchenStatus, 'ready');
+});
+
+test('kitchenStatus is a separate field from the order business status', async () => {
+  const { header, shopId } = await setupOwnerWithShop();
+  const { order, burgerItemId, friesItemId } = await twoItemOrder(header, shopId);
+
+  await setStatus(header, shopId, order.id, burgerItemId, 'ready');
+  await setStatus(header, shopId, order.id, friesItemId, 'ready');
+
+  const paid = await request(app)
+    .post(`/api/shops/${shopId}/orders/${order.id}/payments`)
+    .set('Authorization', header)
+    .send({ method: 'cash', amountTendered: 13 });
+  assert.equal(paid.status, 201);
+
+  const res = await setStatus(header, shopId, order.id, burgerItemId, 'served');
+
+  // Two different meanings, two different names - the payment state and the
+  // prep state must never be conflated into one `status`.
+  assert.equal(res.body.status, 'paid', 'business/payment state');
+  assert.equal(res.body.kitchenStatus, 'ready', 'prep state (fries still ready, not served)');
 });

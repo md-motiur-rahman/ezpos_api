@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { resolveActorFromToken, bearerTokenFrom } from '../staffAuth/actorFromToken.js';
 import { resolveActorAuthority, assertHasPermission } from '../staff/actorAuthority.js';
 import { PERMISSIONS } from '../staff/permissions.js';
+import { toKdsOrderView } from './kdsOrderView.js';
 import { logger } from '../../utils/logger.js';
 
 /**
@@ -51,6 +52,10 @@ const KDS_PATH_PATTERN =
  */
 export const KDS_EVENTS = Object.freeze({
   CONNECTED: 'kds.connected',
+  // Sent immediately before the server closes a socket whose authorization
+  // has been revoked since it connected (see revalidateConnections). A close
+  // frame alone cannot carry a reason a client can branch on.
+  UNAUTHORIZED: 'kds.unauthorized',
   ORDER_CREATED: 'order.created',
   ORDER_ITEMS_ADDED: 'order.items_added',
   ORDER_CANCELLED: 'order.cancelled',
@@ -151,6 +156,14 @@ function send(socket, payload) {
  *
  * A shop with no KDS connected is the overwhelmingly common case and is a
  * silent no-op, not an error.
+ *
+ * The order is narrowed through toKdsOrderView HERE, inside the broadcaster,
+ * rather than at each of the five call sites in order.service.js. That is
+ * deliberate and is the same "correct by construction" reasoning as keying
+ * the registry by shop: a projection applied at the call sites would be one
+ * forgotten line away from leaking the payment ledger again the next time
+ * someone adds an event, whereas a socket physically cannot be sent an
+ * unnarrowed order from here.
  */
 export function broadcastOrderEvent(shopId, type, order) {
   try {
@@ -158,7 +171,7 @@ export function broadcastOrderEvent(shopId, type, order) {
     if (!sockets || sockets.size === 0) {
       return;
     }
-    const payload = { type, shopId, order, at: new Date().toISOString() };
+    const payload = { type, shopId, order: toKdsOrderView(order), at: new Date().toISOString() };
     for (const socket of sockets) {
       try {
         send(socket, payload);
@@ -213,7 +226,101 @@ async function authorizeUpgrade(request) {
     'You do not have permission to view the kitchen display'
   );
 
-  return { shopId, actor };
+  return { shopId, actor, token };
+}
+
+/**
+ * Re-runs the FULL handshake check against one already-connected socket.
+ *
+ * WHY THIS IS NEEDED. Authorization was previously checked once, at the
+ * handshake, and never again. Every REST request re-resolves the actor from
+ * its token, so deactivating a staff member or revoking a permission takes
+ * effect on the very next call - but a WebSocket has no next call. A kitchen
+ * tablet belonging to someone who was deactivated an hour ago kept streaming
+ * live order data indefinitely, held open by the heartbeat.
+ *
+ * It re-resolves from the TOKEN rather than merely re-running
+ * resolveActorAuthority on the actor captured at handshake, and that
+ * distinction is the whole point: resolveActorAuthority trusts the role and
+ * shopId already on the actor object, so on its own it would NOT notice a
+ * deactivated staff member. Only resolveActorFromToken re-reads the staff row
+ * (its JOIN drops soft-deleted staff), re-checks revoked_at, and re-checks
+ * session expiry. Going through it catches all five revocation paths at once:
+ * deactivation, logout, session expiry, a role change, and a withdrawn
+ * permission override.
+ *
+ * FAILS CLOSED on an authorization failure, OPEN on an infrastructure one.
+ * An AppError (or a null actor) means this connection genuinely may no longer
+ * be here, so it is closed. Anything else - most realistically a database
+ * blip - must NOT be treated as revocation: doing so would disconnect every
+ * KDS in every shop the moment the database hiccuped, turning a brief outage
+ * into an estate-wide kitchen blackout. That mirrors resolveActorFromToken's
+ * own rule that an infrastructure failure stays a 500 and never degrades into
+ * a misleading 401.
+ *
+ * SIDE EFFECT, deliberate and flagged: resolveActorFromToken touches
+ * last_active_at, so a connected KDS keeps its staff session alive on the
+ * sliding 60-minute window. That preserves today's behaviour (a kitchen
+ * screen stays up through a long service) instead of dropping every socket on
+ * the hour, at the cost of a tablet left switched on holding a session open.
+ * The trade was taken this way round because a screen that dies hourly
+ * mid-service is a worse failure than a session that outlives an idle shift.
+ */
+async function revalidateConnection(ws) {
+  const actor = await resolveActorFromToken(ws.kdsToken);
+  if (!actor) {
+    return { ok: false, statusCode: 401, message: 'Authentication is no longer valid' };
+  }
+  const authority = await resolveActorAuthority(actor, ws.kdsShopId);
+  assertHasPermission(
+    authority,
+    PERMISSIONS.VIEW_KDS,
+    'You no longer have permission to view the kitchen display'
+  );
+  return { ok: true };
+}
+
+/** WebSocket close codes are application-defined in the 4000-4999 range. */
+const CLOSE_CODE_FOR = Object.freeze({ 401: 4401, 403: 4403, 404: 4404 });
+
+function disconnectUnauthorized(ws, statusCode, message) {
+  send(ws, { type: KDS_EVENTS.UNAUTHORIZED, statusCode, message, at: new Date().toISOString() });
+  ws.close(CLOSE_CODE_FOR[statusCode] ?? 4401, message.slice(0, 120));
+}
+
+/**
+ * Sweeps every live socket. Never throws and is never awaited by the
+ * heartbeat - one socket's problem must not stop the others being checked,
+ * and a rejected promise here would be an unhandled rejection that
+ * server.js's handler turns into a process exit.
+ */
+export async function revalidateConnections(wss) {
+  for (const ws of wss.clients) {
+    if (ws.readyState !== WebSocket.OPEN || !ws.kdsToken) {
+      continue;
+    }
+    try {
+      const result = await revalidateConnection(ws);
+      if (!result.ok) {
+        logger.warn(
+          { shopId: ws.kdsShopId, statusCode: result.statusCode },
+          'KDS socket closed - authorization revoked'
+        );
+        disconnectUnauthorized(ws, result.statusCode, result.message);
+      }
+    } catch (err) {
+      if (err?.isOperational === true) {
+        logger.warn(
+          { shopId: ws.kdsShopId, statusCode: err.statusCode },
+          'KDS socket closed - authorization revoked'
+        );
+        disconnectUnauthorized(ws, err.statusCode, err.message);
+      } else {
+        // Infrastructure failure - keep the socket. See the fail-open note above.
+        logger.error({ err, shopId: ws.kdsShopId }, 'KDS re-authorization check failed');
+      }
+    }
+  }
 }
 
 /**
@@ -244,10 +351,15 @@ export function attachKdsSocketServer(httpServer) {
         if (result.rejection) {
           return rejectUpgrade(socket, result.rejection.statusCode, result.rejection.message);
         }
-        const { shopId, actor } = result;
+        const { shopId, actor, token } = result;
 
         wss.handleUpgrade(request, socket, head, (ws) => {
           ws.isAlive = true;
+          // Retained so the heartbeat can re-run the full authorization check
+          // (revalidateConnections). In-process memory only - the same token
+          // already lives in the request headers - and never logged or sent.
+          ws.kdsToken = token;
+          ws.kdsShopId = shopId;
           ws.on('pong', () => {
             ws.isAlive = true;
           });
@@ -299,6 +411,13 @@ export function attachKdsSocketServer(httpServer) {
       ws.isAlive = false;
       ws.ping();
     }
+
+    // Deliberately NOT awaited: the liveness sweep above is synchronous and
+    // must not be delayed by database round-trips, and revalidateConnections
+    // handles all of its own errors. Piggy-backing on this existing timer
+    // rather than adding a second one keeps the revocation window bounded by
+    // the same interval the connection is already being probed on.
+    revalidateConnections(wss);
   }, HEARTBEAT_INTERVAL_MS);
   heartbeat.unref();
 

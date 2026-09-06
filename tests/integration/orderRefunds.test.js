@@ -426,8 +426,22 @@ test('a payment belonging to a different order cannot be refunded through this o
     items: [{ menuItemId: burgerId, quantity: 1 }],
   });
 
+  // Setup is asserted rather than assumed. This test has failed once under
+  // full-suite load with `TypeError: Cannot read properties of undefined
+  // (reading '0')` on the line below - which says nothing about WHY, because
+  // it only reveals that some earlier request returned an error envelope
+  // instead of an order. Investigation ruled out the obvious candidates (no
+  // 500s, no pool/connection timeouts, and the run's only 429 was
+  // staffAuth.test.js deliberately asserting its own limiter), so the cause
+  // is still unknown. These assertions cost nothing and make the next
+  // occurrence name itself instead of dying two steps downstream.
+  assert.ok(orderA.id, `order A was not created: ${JSON.stringify(orderA)}`);
+  assert.ok(orderB.id, `order B was not created: ${JSON.stringify(orderB)}`);
+
   const paidA = await pay(header, shopId, orderA.id, { method: 'cash', amountTendered: 10 });
-  await pay(header, shopId, orderB.id, { method: 'cash', amountTendered: 10 });
+  assert.equal(paidA.status, 201, `payment on order A failed: ${JSON.stringify(paidA.body)}`);
+  const paidB = await pay(header, shopId, orderB.id, { method: 'cash', amountTendered: 10 });
+  assert.equal(paidB.status, 201, `payment on order B failed: ${JSON.stringify(paidB.body)}`);
 
   // Order A's payment id, addressed through order B's URL.
   const res = await refund(header, shopId, orderB.id, paidA.body.payments[0].id, { amount: 10 });

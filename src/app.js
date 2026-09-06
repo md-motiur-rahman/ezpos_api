@@ -30,6 +30,32 @@ import orderRoutes from './modules/orders/order.routes.js';
 
 const app = express();
 
+/**
+ * Render (and any reverse proxy) terminates TLS and forwards to this process,
+ * so without this every request's `req.ip` is the PROXY's address rather than
+ * the client's. That silently breaks both rate limiters below: the global one
+ * would key every tenant in the system to a single bucket, turning a
+ * 300-per-15-min PER-CLIENT limit into a 300-per-15-min limit for the ENTIRE
+ * platform, and the staff-login limiter's deliberate (IP, shopId) keying
+ * (CLAUDE.md section 5) would collapse to per-shop-globally - so several
+ * tills in one busy shop could lock each other out.
+ *
+ * The value is 1, NOT `true`, and that distinction is the security-critical
+ * part. `true` trusts the whole X-Forwarded-For chain, which makes its
+ * LEFTMOST entry authoritative - and that entry is supplied by the client, so
+ * anyone could spoof an IP per request and defeat rate limiting entirely.
+ * A fixed hop count only ever trusts addresses appended by infrastructure we
+ * actually control.
+ *
+ * 1 is correct for this deployment: render.yaml declares a single
+ * `type: web` service with no CDN in front of it. If a CDN (Cloudflare etc.)
+ * is ever added, this becomes 2 - and the failure mode of leaving it at 1 is
+ * safe, just less precise: req.ip falls back to the CDN's address, which is
+ * exactly today's behaviour and still not client-controllable. Under-counting
+ * hops degrades; over-counting is what opens the hole.
+ */
+app.set('trust proxy', 1);
+
 // --- CORS ---
 const corsOptions = {
   origin(origin, callback) {
@@ -47,9 +73,42 @@ const corsOptions = {
 };
 
 // --- Rate limiting ---
+
+/**
+ * 300 per IP per 15 minutes in every real environment. Production behaviour is
+ * completely unchanged by the test branch below.
+ *
+ * Raised to an unreachable ceiling under NODE_ENV=test as DEFENCE against a
+ * latent fragility, not as a fix for any observed failure - stated plainly
+ * because it was first added on a WRONG diagnosis and the measurements did not
+ * support it. In the suite every request comes from 127.0.0.1, and `node
+ * --test` gives each test FILE its own process, so each file spends against
+ * its own 300-request budget under one shared key. Measured across a full
+ * run, the lowest remaining on THIS limiter was 36 - i.e. some single file
+ * already consumes ~264 of its 300 (88%). Nothing has crossed the line yet,
+ * but a file that grows a little would, and the failure mode is horrible to
+ * diagnose: the 429 arrives as an error envelope, so the test reads a missing
+ * field off it and dies with a TypeError naming neither rate limiting nor the
+ * real cause.
+ *
+ * The project already documents this hazard for the STAFF-LOGIN limiter
+ * (CLAUDE.md section 5: keep per-file login counts reasonable, split files if
+ * needed). This is the same trap one level up, previously unnoted.
+ *
+ * The middleware stays MOUNTED and active in test - headers are still emitted
+ * and the code path still exercised - the ceiling is simply out of reach for
+ * one file. That beats skipping the middleware (which would stop exercising
+ * it) and beats splitting whichever file is at 264, which only buys headroom
+ * until the next one grows.
+ *
+ * The STAFF-LOGIN limiter (staffAuth.routes.js, 10 per 15 min) is deliberately
+ * NOT relaxed - staffAuth.test.js genuinely asserts its 429.
+ */
+const RATE_LIMIT_MAX = config.env.isTest ? 1_000_000 : 300;
+
 const rateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  limit: 300, // requests per IP per window
+  limit: RATE_LIMIT_MAX, // requests per IP per window
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: { message: 'Too many requests, please try again later.' } },

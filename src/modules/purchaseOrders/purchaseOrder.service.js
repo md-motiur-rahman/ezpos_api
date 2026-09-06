@@ -74,9 +74,31 @@ function toDetailResponse(po, items, receipts, receiptItemsByReceiptId) {
   // (3.6), just computed in JS here since the rows are already in hand.
   // Based on ORDERED quantity, not received - this is what was agreed to
   // pay, independent of how much has actually arrived so far.
-  const totalCost = mappedItems.reduce(
-    (sum, item) => sum + (item.unitCost === null ? 0 : item.unitCost * item.orderedQuantity),
-    0
+  //
+  // Settled to 5 decimal places, and 5 is not arbitrary: it is exactly the
+  // scale Postgres produces for this same total on the LIST endpoint, which
+  // computes it as COALESCE(SUM(poi.quantity * poi.unit_cost), 0) - a
+  // numeric(10,3) times a numeric(10,2) is exact at scale 5, and summing
+  // those keeps scale 5. Without this rounding the two endpoints can return
+  // different numbers for the SAME purchase order: 1.005 x 3.33 is 3.34665
+  // out of SQL but 3.3466500000000004 in JS floating point.
+  //
+  // Deliberately NOT rounded to 2dp. That would look like the natural choice
+  // for a money field, but it would make this DISAGREE with the list
+  // endpoint (3.35 vs 3.34665) - i.e. it would introduce the very divergence
+  // this is here to remove. Rounding to the scale SQL actually yields is
+  // what makes the two definitions of totalCost provably identical, the same
+  // "one definition of a total" discipline as 9.5's amountPaid and 9.8's
+  // vatAmount. Float error is ~1e-10 at realistic PO magnitudes, far below
+  // the 5e-6 that could change a 5dp result, so this only ever rounds away
+  // representation noise, never real precision.
+  const totalCost = Number(
+    mappedItems
+      .reduce(
+        (sum, item) => sum + (item.unitCost === null ? 0 : item.unitCost * item.orderedQuantity),
+        0
+      )
+      .toFixed(5)
   );
   const mappedReceipts = receipts.map((r) =>
     toReceiptResponse(r, receiptItemsByReceiptId.get(r.id) ?? [])
@@ -216,6 +238,26 @@ export async function createReceipt(actor, shopId, poId, { receivedAt, notes, it
   // Resolve each receipt line's underlying inventory_item_id via the
   // already-fetched po items (no second lookup needed), then bulk-increment
   // stock in one statement.
+  //
+  // LOAD-BEARING INVARIANT, documented here because it is enforced in a
+  // DIFFERENT file and is easy to break by accident: the array built below
+  // must never contain the same inventory_item_id twice. adjustInventoryQuantities
+  // uses UPDATE...FROM unnest(), which - verified empirically in 7.9 -
+  // silently applies only ONE delta per duplicated id and drops the rest
+  // with no error, i.e. a duplicate here would under-increment stock
+  // invisibly.
+  //
+  // Two separate refines make that impossible today, and BOTH are required:
+  //   - createReceiptSchema dedups purchaseOrderItemId within one receipt.
+  //   - createPurchaseOrderSchema dedups inventoryItemId within one PO,
+  //     so two distinct PO lines can never point at the same stock item.
+  // The second one is the non-obvious half: it was written to keep a PO
+  // tidy ("each item should appear once, with one quantity"), not for this
+  // reason, but relaxing it - e.g. to allow ordering the same item twice at
+  // two different unit costs, a perfectly reasonable future request - would
+  // silently break receiving here. If that refine is ever loosened, this
+  // call must pre-aggregate by inventory_item_id first, exactly as 7.9's
+  // deduction engine already does.
   const poItemById = new Map(poItems.map((pi) => [pi.id, pi]));
   const inventoryItemIds = items.map((i) => poItemById.get(i.purchaseOrderItemId).inventory_item_id);
   const amounts = items.map((i) => i.quantityReceived);

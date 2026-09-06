@@ -55,10 +55,28 @@ process.on('unhandledRejection', (err) => {
  * hang. Recorded here because the opposite (that it would hang) is the
  * intuitive assumption and would be wrong.
  */
+const SHUTDOWN_GRACE_MS = 10_000;
+
 function shutdown(signal) {
   logger.info(`${signal} received. Shutting down gracefully...`);
   kdsSocketServer.close();
+
+  // Hard deadline. server.close() waits for every in-flight request to
+  // finish and does NOT time out on its own, so a single hung request (a
+  // query with no statement_timeout, say) would otherwise keep the process
+  // alive until the platform SIGKILLs it - losing the clean-shutdown log
+  // and any chance of an orderly exit. unref()'d so it can never by itself
+  // hold the process open when close() finishes normally first.
+  const forceExit = setTimeout(() => {
+    logger.warn(
+      `Shutdown still pending after ${SHUTDOWN_GRACE_MS}ms - forcing exit with in-flight requests outstanding.`
+    );
+    process.exit(1);
+  }, SHUTDOWN_GRACE_MS);
+  forceExit.unref();
+
   server.close(() => {
+    clearTimeout(forceExit);
     logger.info('Server closed.');
     process.exit(0);
   });

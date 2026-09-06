@@ -523,17 +523,21 @@ test('the deduction is invisible in the response - no new fields, same totals', 
 
   assert.equal(res.status, 200);
   assert.equal(after.status, 'ready');
-  // Every pre-existing field survives untouched...
-  assert.equal(after.unitPrice, before.unitPrice);
-  assert.equal(after.lineTotal, before.lineTotal);
-  assert.equal(after.total, before.total);
-  assert.equal(res.body.subtotal, f.order.subtotal);
-  assert.equal(res.body.total, f.order.total);
-  // ...and no inventory detail leaks through this VIEW_KDS-gated route.
+  // The kitchen-facing fields are intact and match the created order.
+  assert.equal(after.itemName, before.itemName);
+  assert.equal(after.quantity, before.quantity);
+  // No inventory detail leaks through this VIEW_KDS-gated route - the whole
+  // point of 10.3 adding no response field at all.
   assert.equal(after.inventoryDeductedAt, undefined);
   assert.equal(after.deducted, undefined);
   assert.equal(res.body.deducted, undefined);
   assert.equal(res.body.skipped, undefined);
+  // ...and, since the 10.2 leak fix, no monetary detail either. (This test
+  // previously asserted unitPrice/subtotal/total came back unchanged; that
+  // was the leak, not the contract - see kdsOrderView.js.)
+  assert.equal(after.unitPrice, undefined);
+  assert.equal(res.body.subtotal, undefined);
+  assert.equal(res.body.total, undefined);
 });
 
 // --- Actor coverage ---

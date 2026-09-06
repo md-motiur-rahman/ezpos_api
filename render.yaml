@@ -15,7 +15,7 @@ services:
     runtime: node
     plan: starter
     region: frankfurt
-    branch: main
+    branch: master # must match the repo's actual default branch (origin/HEAD -> origin/master)
     autoDeployTrigger: commit
     buildCommand: npm ci
     preDeployCommand: npm run migrate:up # runs migrations after build, before the new version starts serving traffic
@@ -33,7 +33,29 @@ services:
       # PORT is not set here - Render injects it automatically for web services,
       # and our app already reads it via process.env.PORT (see src/config/env.js).
       #
-      # Future modules will add their own required vars here as they're built:
-      #   JWT_ACCESS_SECRET / JWT_REFRESH_SECRET  <- Module 1
-      #   STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET <- Module 3
-      #   EMAIL_PROVIDER_API_KEY                   <- Module 1
+      # EVERY var below is REQUIRED by src/config/env.js's requiredVars, which
+      # throws at boot if any one is missing - so a Blueprint deploy without
+      # them crash-loops on startup rather than failing gracefully. They were
+      # left as a "future modules will add these" TODO and never filled in as
+      # Modules 1 and 3 actually shipped.
+      #
+      # All are `sync: false`: Render prompts for the value on first deploy and
+      # stores it in the dashboard, so no secret is ever committed to this repo.
+      # (There is deliberately no JWT_REFRESH_SECRET - refresh tokens are opaque
+      # and stored server-side, not JWTs.)
+      - key: JWT_ACCESS_SECRET # Module 1
+        sync: false
+      - key: RESEND_API_KEY # Module 1 - verification/notification email
+        sync: false
+      - key: EMAIL_FROM # Module 1
+        sync: false
+      - key: FRONTEND_URL # Module 1/3 - used to build billing + verification links
+        sync: false
+      - key: STRIPE_SECRET_KEY # Module 3
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET # Module 3
+        sync: false
+      - key: STRIPE_SHOP_PRICE_ID # Module 3
+        sync: false
+      - key: STRIPE_ADDON_HEALTH_SAFETY_PRICE_ID # Module 3
+        sync: false

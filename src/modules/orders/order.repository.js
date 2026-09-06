@@ -8,7 +8,7 @@ const ORDER_COLUMNS = `id, shop_id, type, table_number, customer_name, status,
                        cancelled_at, cancelled_by_actor_type, cancelled_by_actor_id,
                        cancellation_reason, was_prepped,
                        client_order_id, occurred_at, sync_payload_hash,
-                       vat_rate`;
+                       vat_rate, order_number, order_date`;
 
 const ORDER_ITEM_DISCOUNT_COLUMNS = `discount_type, discount_value, discount_reason,
                        discounted_by_actor_type, discounted_by_actor_id, discounted_at`;
@@ -16,15 +16,59 @@ const ORDER_ITEM_DISCOUNT_COLUMNS = `discount_type, discount_value, discount_rea
 const ORDER_ITEM_VOID_COLUMNS = `voided_at, voided_by_actor_type, voided_by_actor_id,
                        void_reason, was_prepped`;
 
+/**
+ * Draws the next per-shop, per-day order number in ONE atomic statement.
+ *
+ * THE ON CONFLICT ... DO UPDATE IS THE CONCURRENCY MECHANISM, not a
+ * convenience. Postgres serializes concurrent writers on the
+ * (shop_id, business_date) primary key, so each caller's RETURNING sees its
+ * own incremented value. The obvious alternative - SELECT max(order_number)+1
+ * then INSERT - would hand two tills ringing up simultaneously the SAME
+ * number, because this project has no transaction wrapper anywhere
+ * (CLAUDE.md section 2) to make that read-then-write atomic.
+ *
+ * Verified empirically before any code was written against it, the same
+ * discipline as 10.3's deduction claim and 9.7's ON CONFLICT finding: 50
+ * genuinely concurrent allocations returned 50 DISTINCT numbers, contiguous
+ * 1..50 with no duplicates; a second date started again at 1; a second shop
+ * kept its own independent sequence.
+ *
+ * `businessDate` is passed IN as a 'YYYY-MM-DD' string rather than letting
+ * Postgres compute CURRENT_DATE, so there is exactly one definition of "which
+ * day is this" shared by the caller and the row - the same reasoning 8.4 used
+ * in passing its own "today" rather than relying on the database's, so server
+ * and DB timezone settings can never silently disagree.
+ */
+export async function allocateOrderNumber(shopId, businessDate) {
+  const { rows } = await query(
+    `INSERT INTO shop_order_counters (shop_id, business_date, last_number)
+     VALUES ($1, $2, 1)
+     ON CONFLICT (shop_id, business_date)
+     DO UPDATE SET last_number = shop_order_counters.last_number + 1, updated_at = now()
+     RETURNING last_number`,
+    [shopId, businessDate]
+  );
+  return rows[0].last_number;
+}
+
 export async function createOrder(
   shopId,
-  { type, tableNumber, customerName, createdByActorType, createdByActorId, vatRate }
+  {
+    type,
+    tableNumber,
+    customerName,
+    createdByActorType,
+    createdByActorId,
+    vatRate,
+    orderNumber,
+    orderDate,
+  }
 ) {
   const { rows } = await query(
     `INSERT INTO orders
        (shop_id, type, table_number, customer_name, created_by_actor_type, created_by_actor_id,
-        vat_rate)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+        vat_rate, order_number, order_date)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING ${ORDER_COLUMNS}`,
     [
       shopId,
@@ -34,6 +78,8 @@ export async function createOrder(
       createdByActorType,
       createdByActorId,
       vatRate,
+      orderNumber ?? null,
+      orderDate ?? null,
     ]
   );
   return rows[0];
@@ -95,7 +141,7 @@ export async function listOrdersForShop(shopId) {
   const { rows } = await query(
     `SELECT o.id, o.shop_id, o.type, o.table_number, o.customer_name, o.status,
             o.created_by_actor_type, o.created_by_actor_id, o.created_at, o.updated_at,
-            o.client_order_id, o.occurred_at,
+            o.client_order_id, o.occurred_at, o.order_number, o.order_date,
             count(oi.id)::int AS item_count
      FROM orders o
      LEFT JOIN order_items oi ON oi.order_id = o.id
@@ -478,13 +524,15 @@ export async function createSyncedOrder(
     occurredAt,
     syncPayloadHash,
     vatRate,
+    orderNumber,
+    orderDate,
   }
 ) {
   const { rows } = await query(
     `INSERT INTO orders
        (shop_id, type, table_number, customer_name, created_by_actor_type, created_by_actor_id,
-        client_order_id, occurred_at, sync_payload_hash, vat_rate)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        client_order_id, occurred_at, sync_payload_hash, vat_rate, order_number, order_date)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      ON CONFLICT (shop_id, client_order_id) WHERE client_order_id IS NOT NULL
      DO NOTHING
      RETURNING ${ORDER_COLUMNS}`,
@@ -499,6 +547,8 @@ export async function createSyncedOrder(
       occurredAt,
       syncPayloadHash,
       vatRate,
+      orderNumber ?? null,
+      orderDate ?? null,
     ]
   );
   return rows[0] ?? null;

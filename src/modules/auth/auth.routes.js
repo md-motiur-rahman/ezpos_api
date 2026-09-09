@@ -6,8 +6,6 @@ import {
   verifyEmailSchema,
   resendVerificationSchema,
   loginSchema,
-  refreshSchema,
-  logoutSchema,
   forgotPasswordSchema,
   resetPasswordSchema,
   confirmEmailChangeSchema,
@@ -23,8 +21,9 @@ router.post(
   authController.resendVerification
 );
 router.post('/login', validateBody(loginSchema), authController.login);
-router.post('/refresh', validateBody(refreshSchema), authController.refresh);
-router.post('/logout', validateBody(logoutSchema), authController.logout);
+// No body: the refresh token travels as an HttpOnly cookie, not a request field.
+router.post('/refresh', authController.refresh);
+router.post('/logout', authController.logout);
 router.post('/forgot-password', validateBody(forgotPasswordSchema), authController.forgotPassword);
 router.post('/reset-password', validateBody(resetPasswordSchema), authController.resetPassword);
 router.post(

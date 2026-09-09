@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import pinoHttp from 'pino-http';
 import rateLimit from 'express-rate-limit';
@@ -161,6 +162,7 @@ const rateLimiter = rateLimit({
 // --- Core middleware ---
 app.use(helmet());
 app.use(cors(corsOptions));
+app.use(cookieParser());
 app.use(rateLimiter);
 app.use(pinoHttp({ logger })); // structured request logging (method, path, status, duration)
 

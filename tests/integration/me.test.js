@@ -27,6 +27,13 @@ async function authHeaderFor(user) {
   return `Bearer ${signAccessToken(user)}`;
 }
 
+/** The refresh token now travels as an HttpOnly cookie, not a response body field. */
+function extractRefreshCookie(res) {
+  const setCookie = res.headers['set-cookie'] || [];
+  const cookie = setCookie.find((c) => c.startsWith('refreshToken='));
+  return cookie.split(';')[0];
+}
+
 // --- Auth guard ---
 
 test('all /api/me endpoints reject requests with no auth token', async () => {
@@ -96,7 +103,7 @@ test('POST /api/me/change-password succeeds and revokes existing sessions', asyn
   const user = await insertUser(email);
 
   const loginRes = await request(app).post('/api/auth/login').send({ email, password: KNOWN_PASSWORD });
-  const oldRefreshToken = loginRes.body.refreshToken;
+  const oldRefreshCookie = extractRefreshCookie(loginRes);
 
   const res = await request(app)
     .post('/api/me/change-password')
@@ -104,9 +111,7 @@ test('POST /api/me/change-password succeeds and revokes existing sessions', asyn
     .send({ currentPassword: KNOWN_PASSWORD, newPassword: 'brandnewpassword456' });
   assert.equal(res.status, 200);
 
-  const refreshRes = await request(app)
-    .post('/api/auth/refresh')
-    .send({ refreshToken: oldRefreshToken });
+  const refreshRes = await request(app).post('/api/auth/refresh').set('Cookie', oldRefreshCookie);
   assert.equal(refreshRes.status, 401);
 
   const newLoginRes = await request(app)

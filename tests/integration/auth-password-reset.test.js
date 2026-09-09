@@ -20,6 +20,13 @@ async function insertUser(email) {
   return rows[0].id;
 }
 
+/** The refresh token now travels as an HttpOnly cookie, not a response body field. */
+function extractRefreshCookie(res) {
+  const setCookie = res.headers['set-cookie'] || [];
+  const cookie = setCookie.find((c) => c.startsWith('refreshToken='));
+  return cookie.split(';')[0];
+}
+
 async function insertResetToken(userId, { expiresAt, usedAt = null }) {
   const raw = crypto.randomBytes(32).toString('hex');
   const hash = crypto.createHash('sha256').update(raw).digest('hex');
@@ -67,7 +74,7 @@ test('POST /api/auth/reset-password updates the password and revokes existing se
   const loginRes = await request(app)
     .post('/api/auth/login')
     .send({ email, password: 'originalpassword123' });
-  const oldRefreshToken = loginRes.body.refreshToken;
+  const oldRefreshCookie = extractRefreshCookie(loginRes);
 
   const res = await request(app)
     .post('/api/auth/reset-password')
@@ -87,9 +94,7 @@ test('POST /api/auth/reset-password updates the password and revokes existing se
   assert.equal(newLoginRes.status, 200);
 
   // Session from before the reset is revoked.
-  const refreshRes = await request(app)
-    .post('/api/auth/refresh')
-    .send({ refreshToken: oldRefreshToken });
+  const refreshRes = await request(app).post('/api/auth/refresh').set('Cookie', oldRefreshCookie);
   assert.equal(refreshRes.status, 401);
 });
 

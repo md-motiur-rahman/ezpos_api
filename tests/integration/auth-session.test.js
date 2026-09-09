@@ -23,9 +23,16 @@ async function insertUser({ email, verified = true }) {
   return rows[0].id;
 }
 
+/** The refresh token now travels as an HttpOnly cookie, not a response body field. */
+function extractRefreshCookie(res) {
+  const setCookie = res.headers['set-cookie'] || [];
+  const cookie = setCookie.find((c) => c.startsWith('refreshToken='));
+  return cookie.split(';')[0];
+}
+
 async function loginAs(email) {
   const res = await request(app).post('/api/auth/login').send({ email, password: KNOWN_PASSWORD });
-  return res.body;
+  return { accessToken: res.body.accessToken, refreshCookie: extractRefreshCookie(res) };
 }
 
 // --- POST /api/auth/login ---
@@ -38,7 +45,15 @@ test('POST /api/auth/login succeeds with correct credentials', async () => {
 
   assert.equal(res.status, 200);
   assert.ok(res.body.accessToken);
-  assert.ok(res.body.refreshToken);
+  // Cookie-only by design - never in the JSON body, so an XSS payload reading
+  // the response can't get at it the way it could a body field.
+  assert.equal(res.body.refreshToken, undefined);
+
+  const refreshCookie = extractRefreshCookie(res);
+  assert.ok(refreshCookie);
+  assert.match(refreshCookie, /^refreshToken=/);
+  const setCookie = res.headers['set-cookie'].find((c) => c.startsWith('refreshToken='));
+  assert.match(setCookie, /HttpOnly/i);
 });
 
 test('POST /api/auth/login rejects a wrong password with 401', async () => {
@@ -72,29 +87,38 @@ test('POST /api/auth/login rejects an unverified account with 403', async () => 
 test('POST /api/auth/refresh issues a new token pair for a valid refresh token', async () => {
   const email = uniqueEmail('refresh-ok');
   await insertUser({ email });
-  const { refreshToken } = await loginAs(email);
+  const { refreshCookie } = await loginAs(email);
 
-  const res = await request(app).post('/api/auth/refresh').send({ refreshToken });
+  const res = await request(app).post('/api/auth/refresh').set('Cookie', refreshCookie);
 
   assert.equal(res.status, 200);
   assert.ok(res.body.accessToken);
-  assert.ok(res.body.refreshToken);
-  assert.notEqual(res.body.refreshToken, refreshToken); // rotated, not reused
+  assert.equal(res.body.refreshToken, undefined); // cookie-only, same as login
+
+  const newRefreshCookie = extractRefreshCookie(res);
+  assert.ok(newRefreshCookie);
+  assert.notEqual(newRefreshCookie, refreshCookie); // rotated, not reused
 });
 
 test('POST /api/auth/refresh rejects a token that was already rotated out', async () => {
   const email = uniqueEmail('refresh-rotated');
   await insertUser({ email });
-  const { refreshToken } = await loginAs(email);
+  const { refreshCookie } = await loginAs(email);
 
-  await request(app).post('/api/auth/refresh').send({ refreshToken }); // first use rotates it
-  const res = await request(app).post('/api/auth/refresh').send({ refreshToken }); // reuse
+  await request(app).post('/api/auth/refresh').set('Cookie', refreshCookie); // first use rotates it
+  const res = await request(app).post('/api/auth/refresh').set('Cookie', refreshCookie); // reuse
 
   assert.equal(res.status, 401);
 });
 
 test('POST /api/auth/refresh rejects a bogus token', async () => {
-  const res = await request(app).post('/api/auth/refresh').send({ refreshToken: 'totally-bogus' });
+  const res = await request(app).post('/api/auth/refresh').set('Cookie', 'refreshToken=totally-bogus');
+
+  assert.equal(res.status, 401);
+});
+
+test('POST /api/auth/refresh rejects a missing cookie', async () => {
+  const res = await request(app).post('/api/auth/refresh');
 
   assert.equal(res.status, 401);
 });
@@ -104,17 +128,23 @@ test('POST /api/auth/refresh rejects a bogus token', async () => {
 test('POST /api/auth/logout revokes the session so it can no longer be refreshed', async () => {
   const email = uniqueEmail('logout-ok');
   await insertUser({ email });
-  const { refreshToken } = await loginAs(email);
+  const { refreshCookie } = await loginAs(email);
 
-  const logoutRes = await request(app).post('/api/auth/logout').send({ refreshToken });
+  const logoutRes = await request(app).post('/api/auth/logout').set('Cookie', refreshCookie);
   assert.equal(logoutRes.status, 200);
 
-  const refreshRes = await request(app).post('/api/auth/refresh').send({ refreshToken });
+  const refreshRes = await request(app).post('/api/auth/refresh').set('Cookie', refreshCookie);
   assert.equal(refreshRes.status, 401);
 });
 
 test('POST /api/auth/logout with an already-invalid token is a no-op, not an error', async () => {
-  const res = await request(app).post('/api/auth/logout').send({ refreshToken: 'totally-bogus' });
+  const res = await request(app).post('/api/auth/logout').set('Cookie', 'refreshToken=totally-bogus');
+
+  assert.equal(res.status, 200);
+});
+
+test('POST /api/auth/logout with no cookie at all is a no-op, not an error', async () => {
+  const res = await request(app).post('/api/auth/logout');
 
   assert.equal(res.status, 200);
 });

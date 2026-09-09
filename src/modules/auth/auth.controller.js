@@ -1,4 +1,10 @@
 import { asyncHandler } from '../../utils/asyncHandler.js';
+import { AppError } from '../../utils/AppError.js';
+import {
+  setRefreshTokenCookie,
+  clearRefreshTokenCookie,
+  getRefreshTokenFromRequest,
+} from '../../utils/authCookies.js';
 import * as authService from './auth.service.js';
 
 export const register = asyncHandler(async (req, res) => {
@@ -22,17 +28,28 @@ export const resendVerification = asyncHandler(async (req, res) => {
 });
 
 export const login = asyncHandler(async (req, res) => {
-  const result = await authService.login(req.body);
-  res.status(200).json(result);
+  const { accessToken, refreshToken, user } = await authService.login(req.body);
+  setRefreshTokenCookie(res, refreshToken);
+  res.status(200).json({ accessToken, user });
 });
 
 export const refresh = asyncHandler(async (req, res) => {
-  const result = await authService.refresh(req.body);
-  res.status(200).json(result);
+  const refreshToken = getRefreshTokenFromRequest(req);
+  if (!refreshToken) {
+    throw new AppError('Invalid or expired refresh token', 401);
+  }
+
+  const result = await authService.refresh({ refreshToken });
+  setRefreshTokenCookie(res, result.refreshToken);
+  res.status(200).json({ accessToken: result.accessToken });
 });
 
 export const logout = asyncHandler(async (req, res) => {
-  await authService.logout(req.body);
+  const refreshToken = getRefreshTokenFromRequest(req);
+  if (refreshToken) {
+    await authService.logout({ refreshToken });
+  }
+  clearRefreshTokenCookie(res);
   res.status(200).json({ message: 'Logged out.' });
 });
 

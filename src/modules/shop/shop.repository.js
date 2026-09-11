@@ -106,3 +106,20 @@ export async function setStripeSubscriptionItemId(id, stripeSubscriptionItemId) 
     [stripeSubscriptionItemId, id]
   );
 }
+
+/**
+ * The ONE Stripe line item this company's shops are billed through - every
+ * active shop carries the same id, and its quantity is the shop count (see
+ * the drop-unique-stripe-subscription-item-id migration for why). Returns
+ * null before the first shop exists, which is the caller's signal to create
+ * the item rather than re-quantify it.
+ */
+export async function findSharedStripeItemIdForCompany(companyId) {
+  const { rows } = await query(
+    `SELECT stripe_subscription_item_id FROM shops
+     WHERE company_id = $1 AND deleted_at IS NULL AND stripe_subscription_item_id IS NOT NULL
+     LIMIT 1`,
+    [companyId]
+  );
+  return rows[0]?.stripe_subscription_item_id ?? null;
+}

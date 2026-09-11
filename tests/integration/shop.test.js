@@ -381,7 +381,51 @@ test('creating the first shop creates a subscription and a line item', async () 
   assert.ok(rows[0].stripe_subscription_item_id.startsWith('si_test_'));
 });
 
-test('creating a second shop reuses the subscription and adds a separate line item', async () => {
+/**
+ * This test previously asserted the OPPOSITE - that each shop gets its own
+ * line item - which was the bug, not the contract. Stripe rejects a second
+ * item referencing a Price already on the subscription, so that shape could
+ * only ever work against the test stub; in production the rejection was
+ * caught by createShop and the second shop was silently rolled back.
+ * Shops now share one item whose quantity is the shop count.
+ */
+test('creating a second shop reuses the subscription AND its shop line item', async () => {
+  const { userId, header } = await setupOwnerWithCompany('chain');
+
+  await request(app).post('/api/shops').set('Authorization', header).send(VALID_SHOP);
+  const second = await request(app)
+    .post('/api/shops')
+    .set('Authorization', header)
+    .send({ ...VALID_SHOP, name: 'Second Shop' });
+
+  assert.equal(second.status, 201);
+
+  const rows = await billingState(userId);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].stripe_subscription_id, rows[1].stripe_subscription_id);
+  assert.equal(rows[0].stripe_subscription_item_id, rows[1].stripe_subscription_item_id);
+});
+
+/** The actual reported bug: the second shop appeared, then silently vanished. */
+test('a second shop for a chain business still exists after creation', async () => {
+  const { header } = await setupOwnerWithCompany('chain');
+
+  await request(app).post('/api/shops').set('Authorization', header).send(VALID_SHOP);
+  const second = await request(app)
+    .post('/api/shops')
+    .set('Authorization', header)
+    .send({ ...VALID_SHOP, name: 'Second Shop' });
+
+  const getRes = await request(app)
+    .get(`/api/shops/${second.body.id}`)
+    .set('Authorization', header);
+  assert.equal(getRes.status, 200);
+
+  const listRes = await request(app).get('/api/shops').set('Authorization', header);
+  assert.equal(listRes.body.length, 2);
+});
+
+test('a third shop keeps sharing the same line item', async () => {
   const { userId, header } = await setupOwnerWithCompany('chain');
 
   await request(app).post('/api/shops').set('Authorization', header).send(VALID_SHOP);
@@ -389,13 +433,33 @@ test('creating a second shop reuses the subscription and adds a separate line it
     .post('/api/shops')
     .set('Authorization', header)
     .send({ ...VALID_SHOP, name: 'Second Shop' });
+  await request(app)
+    .post('/api/shops')
+    .set('Authorization', header)
+    .send({ ...VALID_SHOP, name: 'Third Shop' });
 
   const rows = await billingState(userId);
-  assert.equal(rows.length, 2);
-  // Same subscription for both...
-  assert.equal(rows[0].stripe_subscription_id, rows[1].stripe_subscription_id);
-  // ...but each shop has its own line item.
-  assert.notEqual(rows[0].stripe_subscription_item_id, rows[1].stripe_subscription_item_id);
+  assert.equal(rows.length, 3);
+  const itemIds = new Set(rows.map((r) => r.stripe_subscription_item_id));
+  assert.equal(itemIds.size, 1); // one item, quantity 3
+});
+
+test('closing a non-last shop leaves the remaining shop on the same line item', async () => {
+  const { userId, header } = await setupOwnerWithCompany('chain');
+  const first = await request(app).post('/api/shops').set('Authorization', header).send(VALID_SHOP);
+  const second = await request(app)
+    .post('/api/shops')
+    .set('Authorization', header)
+    .send({ ...VALID_SHOP, name: 'Second Shop' });
+  const sharedItemId = (await billingState(userId))[0].stripe_subscription_item_id;
+
+  await request(app).delete(`/api/shops/${first.body.id}`).set('Authorization', header);
+
+  const rows = await billingState(userId);
+  const survivor = rows.find((r) => r.shop_id === second.body.id);
+  assert.equal(survivor.deleted_at, null);
+  // The shared item is NOT deleted just because one of its shops closed.
+  assert.equal(survivor.stripe_subscription_item_id, sharedItemId);
 });
 
 test('deleting a non-last shop leaves the subscription in place', async () => {

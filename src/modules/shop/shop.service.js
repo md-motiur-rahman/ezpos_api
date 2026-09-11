@@ -4,6 +4,7 @@ import {
   createSubscriptionWithShop,
   addSubscriptionItem,
   removeSubscriptionItem,
+  setSubscriptionItemQuantity,
   cancelSubscriptionAtPeriodEnd,
 } from '../../utils/stripe.js';
 import config from '../../config/index.js';
@@ -60,16 +61,35 @@ export async function createShop(ownerUserId, data) {
   const shop = await shopRepository.createShop(company.id, data);
 
   // Billing: first shop creates the company's subscription (Stripe can't
-  // create one with zero items); later shops are added as line items to it.
+  // create one with zero items); later shops raise the QUANTITY on the shop
+  // line item that already exists, rather than adding a second item - Stripe
+  // refuses an item whose Price is already on the subscription, and doing it
+  // that way is what silently killed every chain's second shop.
   // If Stripe fails we roll the shop back, so a shop never exists unbilled.
   try {
     if (company.stripe_subscription_id) {
-      const itemId = await addSubscriptionItem({
-        subscriptionId: company.stripe_subscription_id,
-        priceId: config.env.stripeShopPriceId,
-        metadata: { shopId: shop.id },
-      });
-      await shopRepository.setStripeSubscriptionItemId(shop.id, itemId);
+      const sharedItemId = await shopRepository.findSharedStripeItemIdForCompany(company.id);
+
+      if (sharedItemId) {
+        // Absolute count, not +1: the shop row is already committed above, so
+        // this count includes it and is recomputed from the database rather
+        // than accumulated.
+        const activeShopCount = await shopRepository.countActiveShopsForCompany(company.id);
+        await setSubscriptionItemQuantity({
+          subscriptionItemId: sharedItemId,
+          quantity: activeShopCount,
+        });
+        await shopRepository.setStripeSubscriptionItemId(shop.id, sharedItemId);
+      } else {
+        // Subscription exists but no active shop is carrying its item id -
+        // there is nothing to re-quantify, so this shop starts the item.
+        const itemId = await addSubscriptionItem({
+          subscriptionId: company.stripe_subscription_id,
+          priceId: config.env.stripeShopPriceId,
+          metadata: { shopId: shop.id },
+        });
+        await shopRepository.setStripeSubscriptionItemId(shop.id, itemId);
+      }
     } else {
       // The trial is granted once per company, ever. A company that closed
       // all its shops and reopened gets a fresh subscription but no second
@@ -150,17 +170,37 @@ export async function deleteMyShop(ownerUserId, shopId) {
     // rather than trying to reuse a cancelled one.
     await companyRepository.setStripeSubscriptionId(company.id, null);
   } else {
-    // Not the last shop, so the subscription lives on - this shop's add-on
-    // items must be removed individually, or the company would keep paying
-    // for add-ons on a closed shop.
+    // Not the last shop, so the subscription lives on. Both the shop line
+    // item and each add-on line item are SHARED with the company's other
+    // shops, so closing this one lowers a quantity rather than deleting an
+    // item - deleting it would stop billing for every other shop still using
+    // it. The item is only removed when this was the last user of it.
     const addons = await shopAddonRepository.listActiveAddonsForShop(shop.id);
     for (const addon of addons) {
-      if (addon.stripe_subscription_item_id) {
+      if (!addon.stripe_subscription_item_id) {
+        continue;
+      }
+      const remaining =
+        (await shopAddonRepository.countActiveAddonsOfTypeForCompany(company.id, addon.addon_type)) -
+        1;
+      if (remaining > 0) {
+        await setSubscriptionItemQuantity({
+          subscriptionItemId: addon.stripe_subscription_item_id,
+          quantity: remaining,
+        });
+      } else {
         await removeSubscriptionItem({ subscriptionItemId: addon.stripe_subscription_item_id });
       }
     }
+
     if (shop.stripe_subscription_item_id) {
-      await removeSubscriptionItem({ subscriptionItemId: shop.stripe_subscription_item_id });
+      // activeCount > 1 to reach this branch, so the shop item always has at
+      // least one shop left on it and is never removed here - the last shop
+      // goes through the cancel-the-subscription branch above instead.
+      await setSubscriptionItemQuantity({
+        subscriptionItemId: shop.stripe_subscription_item_id,
+        quantity: activeCount - 1,
+      });
     }
   }
 

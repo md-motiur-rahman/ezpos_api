@@ -105,6 +105,37 @@ export async function addSubscriptionItem({ subscriptionId, priceId, metadata })
 }
 
 /**
+ * Sets the ABSOLUTE quantity on an existing line item, which is how a
+ * company's shop count (and each add-on's shop count) is actually billed:
+ * one item per Price, quantity = how many active shops use it. Stripe
+ * refuses a second item referencing a Price already on the subscription,
+ * so quantity - not a new item - is the only way to bill the 2nd+ shop.
+ *
+ * Absolute rather than an increment/decrement on purpose: the caller passes
+ * the count it just derived from the database, so the billed quantity is
+ * recomputed from the source of truth every time and cannot drift the way a
+ * running +1/-1 would if a call were ever lost or replayed.
+ *
+ * proration_behavior 'none' matches removeSubscriptionItem below: no
+ * mid-cycle credit, no mid-cycle charge - the change lands at the next cycle.
+ */
+export async function setSubscriptionItemQuantity({ subscriptionItemId, quantity }) {
+  if (config.env.isTest) {
+    return;
+  }
+
+  try {
+    await stripe.subscriptionItems.update(subscriptionItemId, {
+      quantity,
+      proration_behavior: 'none',
+    });
+  } catch (err) {
+    logger.error({ err, subscriptionItemId, quantity }, 'Failed to set subscription item quantity');
+    throw new AppError('Failed to update billing', 502);
+  }
+}
+
+/**
  * Removes one line item (a shop or an add-on). proration_behavior 'none'
  * means no credit is issued for the remainder of the current period -
  * matching the agreed policy: no mid-cycle refunds, access continues until

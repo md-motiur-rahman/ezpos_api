@@ -218,6 +218,70 @@ test('an add-on can be reactivated after being deactivated', async () => {
   assert.equal(rows[1].deleted_at, null);
 });
 
+// --- Shared line item across shops (same defect as shops had) ---
+
+/**
+ * Add-ons carry one line item per (company, addonType), shared by every shop
+ * running it - the same reason shops share theirs: Stripe refuses a second
+ * item whose Price is already on the subscription, so a chain enabling the
+ * same add-on on its second shop used to fail and silently roll back.
+ */
+async function addSecondShop(header) {
+  const res = await request(app)
+    .post('/api/shops')
+    .set('Authorization', header)
+    .send({ ...VALID_SHOP, name: 'Second Shop' });
+  return res.body.id;
+}
+
+test('the same add-on on a second shop succeeds and shares one line item', async () => {
+  const { header, shopId } = await setupShop('chain');
+  const secondShopId = await addSecondShop(header);
+
+  const first = await request(app)
+    .post(`/api/shops/${shopId}/addons`)
+    .set('Authorization', header)
+    .send({ addonType: 'health_safety' });
+  const second = await request(app)
+    .post(`/api/shops/${secondShopId}/addons`)
+    .set('Authorization', header)
+    .send({ addonType: 'health_safety' });
+
+  assert.equal(first.status, 201);
+  assert.equal(second.status, 201);
+
+  const firstRows = await addonRows(shopId);
+  const secondRows = await addonRows(secondShopId);
+  assert.equal(
+    firstRows[0].stripe_subscription_item_id,
+    secondRows[0].stripe_subscription_item_id
+  );
+});
+
+test('the add-on stays active on the other shop after one shop deactivates it', async () => {
+  const { header, shopId } = await setupShop('chain');
+  const secondShopId = await addSecondShop(header);
+  await request(app)
+    .post(`/api/shops/${shopId}/addons`)
+    .set('Authorization', header)
+    .send({ addonType: 'health_safety' });
+  await request(app)
+    .post(`/api/shops/${secondShopId}/addons`)
+    .set('Authorization', header)
+    .send({ addonType: 'health_safety' });
+
+  await request(app).delete(`/api/shops/${shopId}/addons/health_safety`).set('Authorization', header);
+
+  const listRes = await request(app)
+    .get(`/api/shops/${secondShopId}/addons`)
+    .set('Authorization', header);
+  assert.equal(listRes.body.length, 1);
+  assert.equal(listRes.body[0].addonType, 'health_safety');
+
+  const rows = await addonRows(shopId);
+  assert.ok(rows[0].deleted_at); // deactivated on this shop only
+});
+
 // --- Shop closure cleans up its add-ons ---
 
 test('closing a non-last shop soft-deletes its add-ons too', async () => {

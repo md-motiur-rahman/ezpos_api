@@ -24,6 +24,7 @@ function toItemResponse(item) {
     // same pattern as shops.default_vat_rate.
     price: Number(item.price),
     displayOrder: item.display_order,
+    isActive: item.is_active,
     createdAt: item.created_at,
     updatedAt: item.updated_at,
   };

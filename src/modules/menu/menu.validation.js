@@ -30,6 +30,7 @@ export const updateItemSchema = z.object({
   description: z.string().trim().optional(),
   price: z.number().positive('Price must be greater than 0').optional(),
   displayOrder: z.number().int().optional(),
+  isActive: z.boolean().optional(),
 });
 
 export const itemIdParamSchema = z.object({

@@ -188,7 +188,7 @@ test('an empty category can be deleted directly', async () => {
 
 // --- Item CRUD ---
 
-test('POST menu-items creates an item under a category', async () => {
+test('POST menu-items creates an item under a category, active by default', async () => {
   const { header } = await setupOwnerWithCompany();
   const category = await createCategory(header);
 
@@ -201,6 +201,34 @@ test('POST menu-items creates an item under a category', async () => {
   assert.equal(res.body.name, 'Soup');
   assert.equal(res.body.price, 5.5);
   assert.equal(res.body.categoryId, category.id);
+  assert.equal(res.body.isActive, true);
+});
+
+test('an item can be toggled inactive without being deleted', async () => {
+  const { header } = await setupOwnerWithCompany();
+  const category = await createCategory(header);
+  const item = await request(app)
+    .post('/api/companies/mine/menu-items')
+    .set('Authorization', header)
+    .send({ categoryId: category.id, name: 'Soup', price: 5.5 });
+
+  const res = await request(app)
+    .patch(`/api/companies/mine/menu-items/${item.body.id}`)
+    .set('Authorization', header)
+    .send({ isActive: false });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.isActive, false);
+
+  // Still fully present in listings and GET - inactive is not the same as deleted.
+  const getRes = await request(app)
+    .get(`/api/companies/mine/menu-items/${item.body.id}`)
+    .set('Authorization', header);
+  assert.equal(getRes.status, 200);
+  assert.equal(getRes.body.isActive, false);
+
+  const listRes = await request(app).get('/api/companies/mine/menu-items').set('Authorization', header);
+  assert.equal(listRes.body.length, 1);
 });
 
 test('POST menu-items with a nonexistent categoryId returns 404', async () => {

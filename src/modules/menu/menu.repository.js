@@ -8,7 +8,7 @@ import {
 } from '../../utils/sql.js';
 
 const CATEGORY_COLUMNS = `id, company_id, name, display_order, is_active, created_at, updated_at`;
-const ITEM_COLUMNS = `id, category_id, name, description, price, display_order, created_at, updated_at`;
+const ITEM_COLUMNS = `id, category_id, name, description, price, display_order, is_active, created_at, updated_at`;
 
 // --- Categories ---
 
@@ -91,7 +91,7 @@ export async function listActiveItemsForCompany(companyId, categoryId) {
   }
   const { rows } = await query(
     `SELECT mi.id, mi.category_id, mi.name, mi.description, mi.price, mi.display_order,
-            mi.created_at, mi.updated_at
+            mi.is_active, mi.created_at, mi.updated_at
      FROM menu_items mi
      JOIN menu_categories mc ON mc.id = mi.category_id AND mc.deleted_at IS NULL
      WHERE mc.company_id = $1 AND mi.deleted_at IS NULL
@@ -105,7 +105,7 @@ export async function listActiveItemsForCompany(companyId, categoryId) {
 export async function findActiveItemByIdForCompany(id, companyId) {
   const { rows } = await query(
     `SELECT mi.id, mi.category_id, mi.name, mi.description, mi.price, mi.display_order,
-            mi.created_at, mi.updated_at
+            mi.is_active, mi.created_at, mi.updated_at
      FROM menu_items mi
      JOIN menu_categories mc ON mc.id = mi.category_id AND mc.deleted_at IS NULL
      WHERE mi.id = $1 AND mc.company_id = $2 AND mi.deleted_at IS NULL`,
@@ -121,6 +121,7 @@ export async function updateItem(id, data) {
     description: 'description',
     price: 'price',
     displayOrder: 'display_order',
+    isActive: 'is_active',
   };
   const { clause, values } = buildUpdateSet(fieldMap, data);
   values.push(id);

@@ -46,6 +46,66 @@ export async function createStripeCustomer({ email, name, companyId }) {
 }
 
 /**
+ * Starts a hosted Stripe Checkout session in SETUP mode - it collects and
+ * stores a card against the existing customer WITHOUT creating or touching a
+ * subscription. Deliberately not mode: 'subscription': the trial and the
+ * subscription's line items are already handled by
+ * createSubscriptionWithShop, and routing them through Checkout instead would
+ * mean two different places could create subscriptions.
+ *
+ * The card does NOT become the customer's default here - Stripe only records
+ * it against the SetupIntent. Promoting it to the default is the
+ * checkout.session.completed webhook's job (see billing.service.js), because
+ * that is the only point at which the card is confirmed saved.
+ */
+export async function createSetupCheckoutSession({ customerId }) {
+  if (config.env.isTest) {
+    return { url: `https://checkout.stripe.com/test/${fakeId('cs')}`, id: fakeId('cs') };
+  }
+
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: 'setup',
+      customer: customerId,
+      payment_method_types: ['card'],
+      success_url: `${config.env.frontendUrl}/billing?checkout=success`,
+      cancel_url: `${config.env.frontendUrl}/billing?checkout=cancelled`,
+    });
+    return { url: session.url, id: session.id };
+  } catch (err) {
+    logger.error({ err, customerId }, 'Failed to create Stripe setup checkout session');
+    throw new AppError('Failed to start payment method setup', 502);
+  }
+}
+
+/**
+ * Promotes the card just collected by a setup-mode Checkout session to the
+ * customer's DEFAULT payment method, which is what subscription invoices
+ * actually charge. Without this the card is stored but never used, and
+ * renewals keep failing exactly as before.
+ *
+ * Returns the payment method id so the caller can record that a card now
+ * exists. Throws rather than swallowing: the webhook must fail loudly and let
+ * Stripe retry, or the company silently stays uncarded.
+ */
+export async function setDefaultPaymentMethodFromSetupIntent({ customerId, setupIntentId }) {
+  if (config.env.isTest) {
+    return fakeId('pm');
+  }
+
+  try {
+    const setupIntent = await stripe.setupIntents.retrieve(setupIntentId);
+    await stripe.customers.update(customerId, {
+      invoice_settings: { default_payment_method: setupIntent.payment_method },
+    });
+    return setupIntent.payment_method;
+  } catch (err) {
+    logger.error({ err, customerId, setupIntentId }, 'Failed to set default payment method');
+    throw new AppError('Failed to save payment method', 502);
+  }
+}
+
+/**
  * Creates the company's subscription with its first shop as the first line
  * item. Stripe can't create a Subscription with zero items, which is why
  * this happens at first-shop time rather than at company setup (3.1).

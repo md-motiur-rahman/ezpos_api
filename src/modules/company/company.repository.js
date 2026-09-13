@@ -5,6 +5,7 @@ const COLUMNS = `id, owner_user_id, name, address_line1, address_line2, city, po
                  country, phone, vat_number, company_number, business_type,
                  card_payment_mode,
                  stripe_customer_id, stripe_subscription_id, trial_ends_at,
+                 has_payment_method,
                  subscription_status, grace_period_ends_at, created_at, updated_at`;
 
 export async function findActiveCompanyByOwner(ownerUserId) {
@@ -127,6 +128,19 @@ export async function setTrialEndsAt(companyId, trialEndsAt) {
   await query(
     `UPDATE companies SET trial_ends_at = $1, updated_at = now() WHERE id = $2`,
     [trialEndsAt, companyId],
+  );
+}
+
+/**
+ * Local mirror of "this Stripe customer has a default payment method", set by
+ * the checkout.session.completed webhook so shop creation can check it without
+ * a live Stripe call. Never cleared today: this app has no remove-card flow,
+ * and a card can only be replaced by completing checkout again.
+ */
+export async function setHasPaymentMethod(companyId, hasPaymentMethod) {
+  await query(
+    `UPDATE companies SET has_payment_method = $1, updated_at = now() WHERE id = $2`,
+    [hasPaymentMethod, companyId],
   );
 }
 

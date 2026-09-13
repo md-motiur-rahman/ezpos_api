@@ -7,6 +7,7 @@ import app from '../../src/app.js';
 import { query } from '../../src/db/pool.js';
 import { signAccessToken } from '../../src/utils/jwt.js';
 import { deductInventoryForSale } from '../../src/modules/inventory/saleDeduction.service.js';
+import { enablePaymentMethod } from '../helpers/billing.js';
 
 /**
  * 7.9's engine has no HTTP route (nothing triggers a deduction until
@@ -51,6 +52,7 @@ async function setupOwnerWithShop() {
     .post('/api/companies/mine/business-type')
     .set('Authorization', header)
     .send({ businessType: 'chain' });
+  await enablePaymentMethod(header);
   const shopRes = await request(app)
     .post('/api/shops')
     .set('Authorization', header)

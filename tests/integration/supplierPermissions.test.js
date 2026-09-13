@@ -6,6 +6,7 @@ import request from 'supertest';
 import app from '../../src/app.js';
 import { query } from '../../src/db/pool.js';
 import { signAccessToken } from '../../src/utils/jwt.js';
+import { enablePaymentMethod } from '../helpers/billing.js';
 
 const KNOWN_PIN = '12345678';
 
@@ -45,6 +46,7 @@ async function setupOwnerWithShop() {
     .post('/api/companies/mine/business-type')
     .set('Authorization', header)
     .send({ businessType: 'chain' });
+  await enablePaymentMethod(header);
   const shopRes = await request(app)
     .post('/api/shops')
     .set('Authorization', header)

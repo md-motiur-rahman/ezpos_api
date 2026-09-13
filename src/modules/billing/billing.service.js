@@ -1,6 +1,7 @@
 import config from '../../config/index.js';
 import { logger } from '../../utils/logger.js';
 import { sendEmail } from '../../utils/mailer.js';
+import { setDefaultPaymentMethodFromSetupIntent } from '../../utils/stripe.js';
 import * as companyRepository from '../company/company.repository.js';
 import * as authRepository from '../auth/auth.repository.js';
 import * as billingRepository from './billing.repository.js';
@@ -15,6 +16,7 @@ const HANDLED_EVENT_TYPES = new Set([
   'invoice.payment_failed',
   'customer.subscription.updated',
   'customer.subscription.deleted',
+  'checkout.session.completed',
 ]);
 
 /**
@@ -118,6 +120,27 @@ export async function handleWebhookEvent(event) {
         await companyRepository.setSubscriptionStatus(company.id, 'canceled');
       }
       break;
+
+    // A card was collected by the setup-mode Checkout session started from
+    // POST /api/companies/mine/billing/checkout-session. Stripe stores it
+    // against the SetupIntent but does NOT make it the customer's default,
+    // and invoices only charge the default - so promoting it here is what
+    // actually makes future renewals succeed.
+    case 'checkout.session.completed': {
+      // Subscription-mode sessions are not something this app creates; if one
+      // ever appears it is not ours to interpret, so record and ignore it.
+      if (object.mode !== 'setup') {
+        break;
+      }
+      if (company) {
+        await setDefaultPaymentMethodFromSetupIntent({
+          customerId: object.customer,
+          setupIntentId: object.setup_intent,
+        });
+        await companyRepository.setHasPaymentMethod(company.id, true);
+      }
+      break;
+    }
   }
 
   const recorded = await billingRepository.recordEvent({

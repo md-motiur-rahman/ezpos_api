@@ -6,6 +6,7 @@ import request from 'supertest';
 import app from '../../src/app.js';
 import { query } from '../../src/db/pool.js';
 import { signAccessToken } from '../../src/utils/jwt.js';
+import { enablePaymentMethod } from '../helpers/billing.js';
 
 function uniqueEmail(label) {
   return `${label}-${crypto.randomUUID()}@example.com`;
@@ -54,6 +55,7 @@ async function setupOwnerWithCompany(businessType) {
       .post('/api/companies/mine/business-type')
       .set('Authorization', header)
       .send({ businessType });
+    await enablePaymentMethod(header);
   }
   return { userId, header };
 }
@@ -238,6 +240,7 @@ test('switching business_type to single is blocked with more than one active sho
     .post('/api/companies/mine/business-type')
     .set('Authorization', header)
     .send({ businessType: 'single' });
+  await enablePaymentMethod(header);
 
   assert.equal(res.status, 409);
 });
@@ -250,6 +253,7 @@ test('switching business_type to single is allowed with exactly one active shop'
     .post('/api/companies/mine/business-type')
     .set('Authorization', header)
     .send({ businessType: 'single' });
+  await enablePaymentMethod(header);
 
   assert.equal(res.status, 200);
 });
@@ -261,6 +265,7 @@ test('switching business_type to single is allowed with zero shops', async () =>
     .post('/api/companies/mine/business-type')
     .set('Authorization', header)
     .send({ businessType: 'single' });
+  await enablePaymentMethod(header);
 
   assert.equal(res.status, 200);
 });
@@ -273,6 +278,7 @@ test('switching business_type to chain is always allowed regardless of shop coun
     .post('/api/companies/mine/business-type')
     .set('Authorization', header)
     .send({ businessType: 'chain' });
+  await enablePaymentMethod(header);
 
   assert.equal(res.status, 200);
 });

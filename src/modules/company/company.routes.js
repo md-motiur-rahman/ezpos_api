@@ -38,6 +38,9 @@ router.get(
   validateQuery(billingHistoryQuerySchema),
   companyController.getBillingHistory
 );
+// Same reasoning, and more so: a locked-out company's way OUT is adding a
+// working card, so this must stay reachable while locked.
+router.post('/mine/billing/checkout-session', companyController.createBillingCheckoutSession);
 // Menu management (6.1) - see menu.routes.js for why this is nested here
 // rather than an independent top-level mount.
 router.use('/mine', menuRoutes);

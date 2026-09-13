@@ -1,5 +1,9 @@
 import { AppError } from '../../utils/AppError.js';
-import { createStripeCustomer, listInvoices } from '../../utils/stripe.js';
+import {
+  createStripeCustomer,
+  listInvoices,
+  createSetupCheckoutSession,
+} from '../../utils/stripe.js';
 import * as companyRepository from './company.repository.js';
 import * as shopService from '../shop/shop.service.js';
 
@@ -26,6 +30,9 @@ function toResponse(company) {
     // User-facing (unlike stripe_customer_id / stripe_subscription_id, which
     // stay internal) - the dashboard needs it to show "X days left in trial".
     trialEndsAt: company.trial_ends_at,
+    // Whether a card is on file. The dashboard gates the first-shop form on
+    // this, since createShop now refuses to start a subscription without one.
+    hasPaymentMethod: company.has_payment_method,
     // Kept in sync from Stripe webhooks (3.5). Null until the first
     // subscription event arrives.
     subscriptionStatus: company.subscription_status,
@@ -140,4 +147,26 @@ export async function getBillingHistory(ownerUserId, { limit }) {
   }
 
   return listInvoices({ customerId: company.stripe_customer_id, limit });
+}
+
+/**
+ * Starts hosted Stripe Checkout for collecting a card. The frontend just
+ * redirects the browser to the returned url; the card is recorded against the
+ * company by the checkout.session.completed webhook, not by anything here -
+ * the owner may abandon the page, and only Stripe can tell us they didn't.
+ *
+ * Requires a Stripe customer, which setBusinessType creates. That ordering is
+ * already enforced for shops ("choose single-shop or chain-business before
+ * adding a shop"), so this reuses the same prerequisite rather than creating a
+ * customer down a second path.
+ */
+export async function createBillingCheckoutSession(ownerUserId) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+
+  if (!company.stripe_customer_id) {
+    throw new AppError('Choose single-shop or chain-business before adding a payment method', 400);
+  }
+
+  const session = await createSetupCheckoutSession({ customerId: company.stripe_customer_id });
+  return { url: session.url };
 }

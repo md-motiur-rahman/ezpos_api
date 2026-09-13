@@ -91,6 +91,20 @@ export async function createShop(ownerUserId, data) {
         await shopRepository.setStripeSubscriptionItemId(shop.id, itemId);
       }
     } else {
+      // No subscription yet, so one is about to be created - and it must have
+      // a card behind it. Stripe will happily START a trial with no payment
+      // method and then fail the renewal invoice 14 days later, leaving the
+      // company past_due; and on the reopen path (trial already used, so
+      // trialDays is null) Stripe refuses outright with "no attached payment
+      // source". Checking here turns both into one clear, actionable error
+      // instead of a silent future failure or a raw Stripe message.
+      //
+      // Checked inside the try so the shop row created above is rolled back
+      // by the existing catch, exactly as a Stripe failure would be.
+      if (!company.has_payment_method) {
+        throw new AppError('Add a payment method before creating a shop', 402);
+      }
+
       // The trial is granted once per company, ever. A company that closed
       // all its shops and reopened gets a fresh subscription but no second
       // free trial - trial_ends_at being already set is what marks it used.

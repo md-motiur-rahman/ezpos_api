@@ -35,3 +35,8 @@ export const getBillingHistory = asyncHandler(async (req, res) => {
   const history = await companyService.getBillingHistory(req.user.id, req.query);
   res.status(200).json(history);
 });
+
+export const createBillingCheckoutSession = asyncHandler(async (req, res) => {
+  const session = await companyService.createBillingCheckoutSession(req.user.id);
+  res.status(201).json(session);
+});

@@ -6,6 +6,7 @@ import request from 'supertest';
 import app from '../../src/app.js';
 import { query } from '../../src/db/pool.js';
 import { signAccessToken } from '../../src/utils/jwt.js';
+import { enablePaymentMethod } from '../helpers/billing.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -54,6 +55,7 @@ async function setupCompany(businessType) {
     .post('/api/companies/mine/business-type')
     .set('Authorization', header)
     .send({ businessType });
+  await enablePaymentMethod(header);
   return { userId, header };
 }
 

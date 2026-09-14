@@ -152,6 +152,20 @@ export async function findPoItemsForPurchaseOrder(purchaseOrderId, poItemIds) {
 // inventory operation (receiving increments, wastage decrements), not
 // something that belongs to the purchase-orders module specifically.
 
+/**
+ * Used to block deleting a PO that has already been received against - same
+ * rule as a menu category that still has items. No deleted_at filter because
+ * receipts have no soft-delete: a receipt is an already-applied state change
+ * (it incremented real stock), so once one exists it exists forever.
+ */
+export async function countReceiptsForPurchaseOrder(purchaseOrderId) {
+  const { rows } = await query(
+    `SELECT count(*)::int AS count FROM purchase_order_receipts WHERE purchase_order_id = $1`,
+    [purchaseOrderId]
+  );
+  return rows[0].count;
+}
+
 export async function listReceiptsForPurchaseOrder(purchaseOrderId) {
   const { rows } = await query(
     `SELECT ${RECEIPT_COLUMNS} FROM purchase_order_receipts

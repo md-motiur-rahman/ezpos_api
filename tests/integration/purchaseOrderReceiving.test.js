@@ -313,3 +313,86 @@ test('receipts have no delete endpoint - they are immutable once created', async
 
   assert.equal(res.status, 404); // no route registered
 });
+// --- Deleting a PO once it has been received against ---
+
+/**
+ * Receiving is this module's one write path that mutates real stock, and
+ * receipts are immutable. Deleting the PO afterwards would leave that stock
+ * with nothing explaining it and hide the receipts behind a parent that 404s.
+ */
+test('a purchase order that has been received against cannot be deleted', async () => {
+  const { header, shopId } = await setupOwnerWithShop();
+  const supplier = await createSupplier(header, shopId);
+  const chicken = await createItem(header, shopId, 'Chicken Breast', 5);
+  const po = await createPo(header, shopId, supplier.id, [{ inventoryItemId: chicken.id, quantity: 10 }]);
+  await request(app)
+    .post(`/api/shops/${shopId}/purchase-orders/${po.id}/receipts`)
+    .set('Authorization', header)
+    .send({ items: [{ purchaseOrderItemId: po.items[0].id, quantityReceived: 10 }] });
+
+  const res = await request(app)
+    .delete(`/api/shops/${shopId}/purchase-orders/${po.id}`)
+    .set('Authorization', header);
+
+  assert.equal(res.status, 409);
+  assert.match(res.body.error.message, /already been received/i);
+});
+
+test('a rejected delete leaves the PO, its receipts, and the received stock intact', async () => {
+  const { header, shopId } = await setupOwnerWithShop();
+  const supplier = await createSupplier(header, shopId);
+  const chicken = await createItem(header, shopId, 'Chicken Breast', 5);
+  const po = await createPo(header, shopId, supplier.id, [{ inventoryItemId: chicken.id, quantity: 10 }]);
+  await request(app)
+    .post(`/api/shops/${shopId}/purchase-orders/${po.id}/receipts`)
+    .set('Authorization', header)
+    .send({ items: [{ purchaseOrderItemId: po.items[0].id, quantityReceived: 10 }] });
+
+  await request(app).delete(`/api/shops/${shopId}/purchase-orders/${po.id}`).set('Authorization', header);
+
+  const getRes = await request(app)
+    .get(`/api/shops/${shopId}/purchase-orders/${po.id}`)
+    .set('Authorization', header);
+  assert.equal(getRes.status, 200);
+  assert.equal(getRes.body.receipts.length, 1); // receipt history still reachable
+
+  const listRes = await request(app)
+    .get(`/api/shops/${shopId}/purchase-orders`)
+    .set('Authorization', header);
+  assert.equal(listRes.body.length, 1); // still listed, not soft-deleted
+
+  const stock = await getItem(header, shopId, chicken.id);
+  assert.equal(stock.quantityOnHand, 15); // 5 initial + 10 received, untouched
+});
+
+/** A PO with nothing received is still just a record of intent - deletable. */
+test('a purchase order with no receipts can still be deleted', async () => {
+  const { header, shopId } = await setupOwnerWithShop();
+  const supplier = await createSupplier(header, shopId);
+  const chicken = await createItem(header, shopId, 'Chicken Breast', 5);
+  const po = await createPo(header, shopId, supplier.id, [{ inventoryItemId: chicken.id, quantity: 10 }]);
+
+  const res = await request(app)
+    .delete(`/api/shops/${shopId}/purchase-orders/${po.id}`)
+    .set('Authorization', header);
+
+  assert.equal(res.status, 200);
+});
+
+/** Partial delivery still counts - stock moved, so the PO is locked. */
+test('even a partial receipt locks the purchase order against deletion', async () => {
+  const { header, shopId } = await setupOwnerWithShop();
+  const supplier = await createSupplier(header, shopId);
+  const chicken = await createItem(header, shopId, 'Chicken Breast', 0);
+  const po = await createPo(header, shopId, supplier.id, [{ inventoryItemId: chicken.id, quantity: 10 }]);
+  await request(app)
+    .post(`/api/shops/${shopId}/purchase-orders/${po.id}/receipts`)
+    .set('Authorization', header)
+    .send({ items: [{ purchaseOrderItemId: po.items[0].id, quantityReceived: 3 }] });
+
+  const res = await request(app)
+    .delete(`/api/shops/${shopId}/purchase-orders/${po.id}`)
+    .set('Authorization', header);
+
+  assert.equal(res.status, 409);
+});

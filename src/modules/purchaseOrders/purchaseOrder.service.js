@@ -198,9 +198,35 @@ export async function getPurchaseOrder(actor, shopId, poId) {
   return fetchPurchaseOrderDetail(shopId, poId);
 }
 
+/**
+ * Deleting a PO is only safe while it is still purely a record of INTENT.
+ * Once anything has been received against it, receiving has already
+ * incremented real stock (createReceipt below is this module's one write
+ * path that mutates quantityOnHand), and those receipts are immutable
+ * "already-applied state change" records with no soft-delete of their own.
+ *
+ * Deleting at that point would leave stock on hand with nothing explaining
+ * where it came from, and orphan the receipts behind a parent that now 404s -
+ * so the receiving history would become invisible while the stock it created
+ * stayed. Blocked with a 409, exactly as a menu category that still has items
+ * is blocked rather than cascading.
+ *
+ * Deliberately NOT solved by giving the PO a status: 7.5 established that
+ * purchase orders have no workflow/status field, and the receipts themselves
+ * are already the record of what actually arrived.
+ */
 export async function deletePurchaseOrder(actor, shopId, poId) {
   await requireManageInventory(actor, shopId);
   const po = await getPurchaseOrderOrThrow(shopId, poId);
+
+  const receiptCount = await purchaseOrderRepository.countReceiptsForPurchaseOrder(po.id);
+  if (receiptCount > 0) {
+    throw new AppError(
+      'Cannot delete a purchase order that has already been received against - its receipts have already adjusted stock',
+      409
+    );
+  }
+
   await purchaseOrderRepository.softDeletePurchaseOrder(po.id);
 }
 

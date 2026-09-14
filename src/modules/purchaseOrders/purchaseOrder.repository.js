@@ -100,18 +100,45 @@ export async function listItemsWithReceivedQuantities(purchaseOrderId) {
   return rows;
 }
 
-export async function softDeletePurchaseOrder(id) {
-  await query(`UPDATE purchase_orders SET deleted_at = now(), updated_at = now() WHERE id = $1`, [id]);
-}
+// The unconditional soft-delete that used to live here was removed rather
+// than left unused: it deleted a PO regardless of whether stock had already
+// been received against it, so keeping it around would leave a way to bypass
+// softDeletePurchaseOrderIfUnreceived below by calling the wrong function.
 
 // --- Stock receiving (7.6) ---
 
 const RECEIPT_COLUMNS = `id, purchase_order_id, received_at, notes, created_at, updated_at`;
 
+/**
+ * Creates the receipt header, but ONLY while the PO is still active - and it
+ * takes a row lock on that PO while doing so. Returns undefined if the PO has
+ * been deleted, which the caller turns into a 404.
+ *
+ * The `UPDATE purchase_orders` in the CTE is the entire point: it locks the
+ * PO row for the duration of this one statement and stamps first_received_at,
+ * which is exactly the column softDeletePurchaseOrderIfUnreceived tests. That
+ * is what makes receiving and deletion MUTUALLY EXCLUSIVE - both write the
+ * same row, so Postgres serialises them and the loser's re-check sees the
+ * winner's write. Verified empirically in BOTH orderings.
+ *
+ * COALESCE keeps the FIRST arrival time, so a second partial delivery never
+ * overwrites it.
+ *
+ * This project has no transaction wrapper anywhere, so serialising on a
+ * shared row lock inside one statement is how atomicity is achieved here -
+ * the same shape as 10.3's deduction claim.
+ */
 export async function createReceipt(purchaseOrderId, { receivedAt, notes }) {
   const { rows } = await query(
-    `INSERT INTO purchase_order_receipts (purchase_order_id, received_at, notes)
-     VALUES ($1, COALESCE($2, now()), $3)
+    `WITH locked_po AS (
+       UPDATE purchase_orders
+       SET updated_at = now(),
+           first_received_at = COALESCE(first_received_at, COALESCE($2, now()))
+       WHERE id = $1 AND deleted_at IS NULL
+       RETURNING id
+     )
+     INSERT INTO purchase_order_receipts (purchase_order_id, received_at, notes)
+     SELECT locked_po.id, COALESCE($2, now()), $3 FROM locked_po
      RETURNING ${RECEIPT_COLUMNS}`,
     [purchaseOrderId, receivedAt ?? null, notes ?? null]
   );
@@ -153,17 +180,33 @@ export async function findPoItemsForPurchaseOrder(purchaseOrderId, poItemIds) {
 // something that belongs to the purchase-orders module specifically.
 
 /**
- * Used to block deleting a PO that has already been received against - same
- * rule as a menu category that still has items. No deleted_at filter because
- * receipts have no soft-delete: a receipt is an already-applied state change
- * (it incremented real stock), so once one exists it exists forever.
+ * Soft-deletes a PO ONLY if nothing has ever been received against it, as a
+ * single statement so the check and the write cannot be interleaved.
+ * Returns undefined when it did not apply - either the PO has receipts, or
+ * it was already deleted.
+ *
+ * The condition is first_received_at on the PO ROW, NOT a subquery over
+ * purchase_order_receipts, and that distinction is load-bearing. Verified
+ * empirically with two overlapping transactions: with the subquery form the
+ * delete blocks on the row lock as expected, but on unblocking READ COMMITTED
+ * re-checks the qual against the updated row while the subquery still reads
+ * the ORIGINAL snapshot - so a receipt committed in the meantime is invisible
+ * and the delete goes through anyway. Testing a column on the same row is
+ * re-read correctly, which is why this form holds and that one did not.
+ *
+ * createReceipt stamps first_received_at in the same statement that inserts
+ * the receipt, so the two contend for one row and whichever commits first
+ * wins. See the migration for the full reasoning.
  */
-export async function countReceiptsForPurchaseOrder(purchaseOrderId) {
+export async function softDeletePurchaseOrderIfUnreceived(id) {
   const { rows } = await query(
-    `SELECT count(*)::int AS count FROM purchase_order_receipts WHERE purchase_order_id = $1`,
-    [purchaseOrderId]
+    `UPDATE purchase_orders
+     SET deleted_at = now(), updated_at = now()
+     WHERE id = $1 AND deleted_at IS NULL AND first_received_at IS NULL
+     RETURNING id`,
+    [id]
   );
-  return rows[0].count;
+  return rows[0];
 }
 
 export async function listReceiptsForPurchaseOrder(purchaseOrderId) {

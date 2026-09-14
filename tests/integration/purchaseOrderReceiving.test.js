@@ -396,3 +396,70 @@ test('even a partial receipt locks the purchase order against deletion', async (
 
   assert.equal(res.status, 409);
 });
+
+/**
+ * The guard reads purchase_orders.first_received_at rather than counting
+ * receipts, so a PO whose receipts predate that column must still be
+ * protected. This simulates one by clearing the stamp the way a pre-migration
+ * row would look, and asserts the backfill query in
+ * 1789425350316_add-first-received-at-to-purchase-orders repairs it.
+ */
+test('the migration backfill protects purchase orders received before the column existed', async () => {
+  const { header, shopId } = await setupOwnerWithShop();
+  const supplier = await createSupplier(header, shopId);
+  const chicken = await createItem(header, shopId, 'Chicken Breast', 0);
+  const po = await createPo(header, shopId, supplier.id, [{ inventoryItemId: chicken.id, quantity: 10 }]);
+  await request(app)
+    .post(`/api/shops/${shopId}/purchase-orders/${po.id}/receipts`)
+    .set('Authorization', header)
+    .send({ items: [{ purchaseOrderItemId: po.items[0].id, quantityReceived: 10 }] });
+
+  // Simulate the pre-migration state: receipts exist, stamp does not.
+  await query(`UPDATE purchase_orders SET first_received_at = NULL WHERE id = $1`, [po.id]);
+
+  // Re-run the migration's backfill.
+  await query(`
+    UPDATE purchase_orders po
+    SET first_received_at = r.first_received_at
+    FROM (
+      SELECT purchase_order_id, min(received_at) AS first_received_at
+      FROM purchase_order_receipts GROUP BY purchase_order_id
+    ) r
+    WHERE r.purchase_order_id = po.id
+  `);
+
+  const res = await request(app)
+    .delete(`/api/shops/${shopId}/purchase-orders/${po.id}`)
+    .set('Authorization', header);
+
+  assert.equal(res.status, 409);
+});
+
+/** A second delivery must not move the recorded first-arrival time. */
+test('a later partial receipt does not overwrite the first arrival time', async () => {
+  const { header, shopId } = await setupOwnerWithShop();
+  const supplier = await createSupplier(header, shopId);
+  const chicken = await createItem(header, shopId, 'Chicken Breast', 0);
+  const po = await createPo(header, shopId, supplier.id, [{ inventoryItemId: chicken.id, quantity: 10 }]);
+  const poItemId = po.items[0].id;
+
+  await request(app)
+    .post(`/api/shops/${shopId}/purchase-orders/${po.id}/receipts`)
+    .set('Authorization', header)
+    .send({ items: [{ purchaseOrderItemId: poItemId, quantityReceived: 4 }] });
+  const { rows: first } = await query(
+    `SELECT first_received_at FROM purchase_orders WHERE id = $1`,
+    [po.id]
+  );
+
+  await request(app)
+    .post(`/api/shops/${shopId}/purchase-orders/${po.id}/receipts`)
+    .set('Authorization', header)
+    .send({ items: [{ purchaseOrderItemId: poItemId, quantityReceived: 6 }] });
+  const { rows: second } = await query(
+    `SELECT first_received_at FROM purchase_orders WHERE id = $1`,
+    [po.id]
+  );
+
+  assert.deepEqual(second[0].first_received_at, first[0].first_received_at);
+});

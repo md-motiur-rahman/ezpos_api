@@ -219,15 +219,17 @@ export async function deletePurchaseOrder(actor, shopId, poId) {
   await requireManageInventory(actor, shopId);
   const po = await getPurchaseOrderOrThrow(shopId, poId);
 
-  const receiptCount = await purchaseOrderRepository.countReceiptsForPurchaseOrder(po.id);
-  if (receiptCount > 0) {
+  // The receipt check is part of the UPDATE itself rather than a separate
+  // count first - see the repository for why that ordering is load-bearing
+  // against a concurrent receipt. A zero-row result means the PO gained a
+  // receipt (or was deleted) between the lookup above and this statement.
+  const deleted = await purchaseOrderRepository.softDeletePurchaseOrderIfUnreceived(po.id);
+  if (!deleted) {
     throw new AppError(
       'Cannot delete a purchase order that has already been received against - its receipts have already adjusted stock',
       409
     );
   }
-
-  await purchaseOrderRepository.softDeletePurchaseOrder(po.id);
 }
 
 // --- Stock receiving (7.6) ---
@@ -258,7 +260,15 @@ export async function createReceipt(actor, shopId, poId, { receivedAt, notes, it
     throw new AppError('One or more line items do not belong to this purchase order', 404);
   }
 
+  // Returns nothing if the PO was deleted between the lookup above and this
+  // write. Treated as "not found" rather than silently receiving stock
+  // against a purchase order that no longer exists - the mirror image of the
+  // guard in deletePurchaseOrder, and the reason nothing below this line can
+  // run against a deleted PO.
   const receipt = await purchaseOrderRepository.createReceipt(po.id, { receivedAt, notes });
+  if (!receipt) {
+    throw new AppError('Purchase order not found', 404);
+  }
   await purchaseOrderRepository.createReceiptItems(receipt.id, items);
 
   // Resolve each receipt line's underlying inventory_item_id via the

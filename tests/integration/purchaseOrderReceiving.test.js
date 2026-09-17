@@ -463,3 +463,44 @@ test('a later partial receipt does not overwrite the first arrival time', async 
 
   assert.deepEqual(second[0].first_received_at, first[0].first_received_at);
 });
+
+// --- TOCTOU: inventory item soft-deleted after the PO was created ---
+
+/**
+ * adjustInventoryQuantities has no deleted_at filter, so without a pre-write
+ * check a receipt could silently add stock to a row no other read/update
+ * endpoint can reach again. createReceipt must validate every referenced
+ * inventory item is still active BEFORE writing the receipt or touching stock.
+ */
+test('receiving against a line whose inventory item was soft-deleted after the PO was created returns 404 and leaves stock unchanged', async () => {
+  const { header, shopId } = await setupOwnerWithShop();
+  const supplier = await createSupplier(header, shopId);
+  const chicken = await createItem(header, shopId, 'Chicken Breast', 5);
+  const po = await createPo(header, shopId, supplier.id, [
+    { inventoryItemId: chicken.id, quantity: 10 },
+  ]);
+  const poItemId = po.items[0].id;
+
+  const deleteRes = await request(app)
+    .delete(`/api/shops/${shopId}/inventory-items/${chicken.id}`)
+    .set('Authorization', header);
+  assert.equal(deleteRes.status, 200);
+
+  const res = await request(app)
+    .post(`/api/shops/${shopId}/purchase-orders/${po.id}/receipts`)
+    .set('Authorization', header)
+    .send({ items: [{ purchaseOrderItemId: poItemId, quantityReceived: 10 }] });
+
+  assert.equal(res.status, 404);
+
+  const { rows } = await query(
+    `SELECT quantity_on_hand FROM inventory_items WHERE id = $1`,
+    [chicken.id]
+  );
+  assert.equal(Number(rows[0].quantity_on_hand), 5); // unchanged - no write occurred
+
+  const receiptsRes = await request(app)
+    .get(`/api/shops/${shopId}/purchase-orders/${po.id}`)
+    .set('Authorization', header);
+  assert.equal(receiptsRes.body.receipts.length, 0); // no receipt row was created either
+});

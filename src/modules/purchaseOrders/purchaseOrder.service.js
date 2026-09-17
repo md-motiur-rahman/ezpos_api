@@ -260,6 +260,24 @@ export async function createReceipt(actor, shopId, poId, { receivedAt, notes, it
     throw new AppError('One or more line items do not belong to this purchase order', 404);
   }
 
+  // TOCTOU guard: an inventory item can be soft-deleted after the PO was
+  // created but before a receipt is logged against it. adjustInventoryQuantities
+  // below has no deleted_at filter (it's a bare UPDATE ... WHERE id = ...),
+  // so without this check stock would silently land on a row no other
+  // read/update endpoint can reach again. Checked here, before ANY write in
+  // this function - this project has no transaction wrapper, so fail-closed
+  // must happen before the first write, same as the line-item check above.
+  const poItemById = new Map(poItems.map((pi) => [pi.id, pi]));
+  const inventoryItemIds = items.map((i) => poItemById.get(i.purchaseOrderItemId).inventory_item_id);
+  const distinctInventoryItemIds = [...new Set(inventoryItemIds)];
+  const activeInventoryItems = await inventoryRepository.findActiveItemsByIdsForShop(
+    shopId,
+    distinctInventoryItemIds
+  );
+  if (activeInventoryItems.length !== distinctInventoryItemIds.length) {
+    throw new AppError('One or more items on this receipt have been deleted from inventory', 404);
+  }
+
   // Returns nothing if the PO was deleted between the lookup above and this
   // write. Treated as "not found" rather than silently receiving stock
   // against a purchase order that no longer exists - the mirror image of the
@@ -293,9 +311,8 @@ export async function createReceipt(actor, shopId, poId, { receivedAt, notes, it
   // two different unit costs, a perfectly reasonable future request - would
   // silently break receiving here. If that refine is ever loosened, this
   // call must pre-aggregate by inventory_item_id first, exactly as 7.9's
-  // deduction engine already does.
-  const poItemById = new Map(poItems.map((pi) => [pi.id, pi]));
-  const inventoryItemIds = items.map((i) => poItemById.get(i.purchaseOrderItemId).inventory_item_id);
+  // deduction engine already does. inventoryItemIds was already resolved
+  // above (before the first write) for the soft-delete check.
   const amounts = items.map((i) => i.quantityReceived);
   await inventoryRepository.adjustInventoryQuantities(inventoryItemIds, amounts);
 

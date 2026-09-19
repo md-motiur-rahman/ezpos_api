@@ -314,20 +314,36 @@ export async function listActiveItemsForCompany(companyId, { lowStockOnly } = {}
  * for every affected item, regardless of how many are adjusted at once.
  * Relocated here from purchaseOrder.repository.js (7.7) - originally built
  * for receiving (7.6, always positive amounts), now shared with wastage
- * (always negative amounts) - genuinely the same mechanism either way,
- * `quantity_on_hand + amount` handles both directions. Renamed from
- * "increment" to "adjust" since that name would be misleading once used for
- * decrements too. Verified empirically (7.6) that repeated calls against
- * the same item correctly accumulate rather than overwrite.
+ * (always negative amounts) and 7.9/10.3's deduction engine - genuinely the
+ * same mechanism either way, `quantity_on_hand + amount` handles all three
+ * directions. Renamed from "increment" to "adjust" since that name would be
+ * misleading once used for decrements too. Verified empirically (7.6) that
+ * repeated calls against the same item correctly accumulate rather than
+ * overwrite.
+ *
+ * `AND deleted_at IS NULL` + RETURNING id is the same-row-condition pattern
+ * used everywhere else in this project to close a TOCTOU without a
+ * transaction wrapper (10.3's inventory_deducted_at claim, the PO
+ * deletion/receiving mutual exclusion) - a soft-delete racing in between an
+ * earlier "is this item active" check and this call can never land stock on
+ * the now-dead row, because the condition is checked as part of THIS same
+ * UPDATE rather than a separate statement. Callers that need to know
+ * whether every id was actually touched (e.g. createReceipt, which already
+ * checked activeness earlier and wants to detect the rare case where a
+ * delete won that race) compare the returned ids against what they expected;
+ * callers that don't care (wastage, the deduction engine - both already
+ * scope their own upstream reads to active items) can simply ignore the
+ * return value, exactly as they do today.
  */
 export async function adjustInventoryQuantities(inventoryItemIds, amounts) {
-  await query(
+  const { rows } = await query(
     `UPDATE inventory_items
      SET quantity_on_hand = quantity_on_hand + delta.amount, updated_at = now()
      FROM (SELECT unnest($1::uuid[]) AS item_id, unnest($2::numeric[]) AS amount) AS delta
-     WHERE inventory_items.id = delta.item_id`,
+     WHERE inventory_items.id = delta.item_id AND inventory_items.deleted_at IS NULL
+     RETURNING inventory_items.id`,
     [inventoryItemIds, amounts]
   );
 
-  
+  return rows.map((row) => row.id);
 }

@@ -260,13 +260,16 @@ export async function createReceipt(actor, shopId, poId, { receivedAt, notes, it
     throw new AppError('One or more line items do not belong to this purchase order', 404);
   }
 
-  // TOCTOU guard: an inventory item can be soft-deleted after the PO was
-  // created but before a receipt is logged against it. adjustInventoryQuantities
-  // below has no deleted_at filter (it's a bare UPDATE ... WHERE id = ...),
-  // so without this check stock would silently land on a row no other
-  // read/update endpoint can reach again. Checked here, before ANY write in
-  // this function - this project has no transaction wrapper, so fail-closed
-  // must happen before the first write, same as the line-item check above.
+  // TOCTOU guard, layer 1: an inventory item can be soft-deleted after the
+  // PO was created but before a receipt is logged against it. This is the
+  // fast-fail path for the realistic case (item already deleted before this
+  // request even started) - nothing has been written yet, so a hit here
+  // costs nothing to reject. Checked before ANY write in this function, same
+  // fail-closed-before-writing discipline as the line-item check above.
+  // Layer 2, for the genuinely concurrent case (a delete racing in the gap
+  // between this check and the actual stock write below), is the
+  // deleted_at IS NULL condition now built into adjustInventoryQuantities
+  // itself - see the verification after that call.
   const poItemById = new Map(poItems.map((pi) => [pi.id, pi]));
   const inventoryItemIds = items.map((i) => poItemById.get(i.purchaseOrderItemId).inventory_item_id);
   const distinctInventoryItemIds = [...new Set(inventoryItemIds)];
@@ -314,7 +317,27 @@ export async function createReceipt(actor, shopId, poId, { receivedAt, notes, it
   // deduction engine already does. inventoryItemIds was already resolved
   // above (before the first write) for the soft-delete check.
   const amounts = items.map((i) => i.quantityReceived);
-  await inventoryRepository.adjustInventoryQuantities(inventoryItemIds, amounts);
+  const adjustedIds = await inventoryRepository.adjustInventoryQuantities(inventoryItemIds, amounts);
+
+  // TOCTOU guard, layer 2: adjustInventoryQuantities only touches rows with
+  // deleted_at IS NULL (same-row condition, no transaction needed - same
+  // pattern as 10.3's inventory_deducted_at claim). Layer 1 above already
+  // rejects the realistic case with nothing written; this catches the truly
+  // concurrent one, where a delete commits in the gap between that check and
+  // this statement. By this point the receipt row already exists - there is
+  // no transaction to roll it back with - so this can only surface the
+  // anomaly loudly rather than silently return 201 with stock that didn't
+  // actually move for the deleted item(s). The receipt itself stays (it's a
+  // true record of what staff physically received); only the automatic
+  // stock increment for that item was skipped, and since deleted inventory
+  // items have no restore path anywhere in this system, that skipped
+  // increment can never resurface as bogus stock later.
+  if (adjustedIds.length !== distinctInventoryItemIds.length) {
+    throw new AppError(
+      'One or more items were deleted from inventory while this receipt was being processed - the receipt was recorded, but stock could not be updated for the deleted item(s)',
+      409
+    );
+  }
 
   return fetchPurchaseOrderDetail(shopId, po.id);
 }

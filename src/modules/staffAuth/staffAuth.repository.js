@@ -1,22 +1,28 @@
 import { query } from '../../db/pool.js';
 
 /**
- * Everything needed to attempt a login in one query: the PIN hash to check
- * against, plus the company's billing state - efficient for a
- * latency-sensitive till boot-up path, avoids a second round trip just to
- * check whether the company is billing-locked.
+ * Everything needed to attempt a login against EVERY shop whose
+ * `staff_id_code` matches - one query, one row per candidate, each carrying
+ * the PIN hash to check and the owning company's billing state. Plural,
+ * not singular, and no `shopId` parameter: `staff_id_code` is only unique
+ * PER SHOP (a partial index on `(shop_id, staff_id_code)`, confirmed
+ * reading the `staff` table's own migration directly, never a global one),
+ * so the same 8-digit code can legitimately belong to a different staff
+ * member at a different shop. `staffAuth.service.js`'s own `login` is what
+ * turns "0, 1, or several candidates" into a real login decision, by
+ * checking the PIN against each one - see its own doc for why that's safe.
  */
-export async function findLoginContext(shopId, staffIdCode) {
+export async function findLoginContextsByStaffIdCode(staffIdCode) {
   const { rows } = await query(
     `SELECT s.id, s.full_name, s.role, s.pin_hash, s.shop_id,
             c.subscription_status, c.grace_period_ends_at
      FROM staff s
      JOIN shops sh ON sh.id = s.shop_id AND sh.deleted_at IS NULL
      JOIN companies c ON c.id = sh.company_id AND c.deleted_at IS NULL
-     WHERE s.shop_id = $1 AND s.staff_id_code = $2 AND s.deleted_at IS NULL`,
-    [shopId, staffIdCode]
+     WHERE s.staff_id_code = $1 AND s.deleted_at IS NULL`,
+    [staffIdCode]
   );
-  return rows[0] ?? null;
+  return rows;
 }
 
 export async function createSession(staffId, tokenHash) {

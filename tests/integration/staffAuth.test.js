@@ -66,12 +66,12 @@ async function activeSessionCount(shopId) {
 
 // --- POST /api/staff-auth/login ---
 
-test('login succeeds with the correct staff ID and PIN', async () => {
+test('login succeeds with the correct staff ID and PIN, resolving the shop with no shopId in the request', async () => {
   const { shopId, staffIdCode } = await setupStaff();
 
   const res = await request(app)
     .post('/api/staff-auth/login')
-    .send({ shopId, staffIdCode, pin: KNOWN_PIN });
+    .send({ staffIdCode, pin: KNOWN_PIN });
 
   assert.equal(res.status, 200);
   assert.ok(res.body.sessionToken);
@@ -80,36 +80,89 @@ test('login succeeds with the correct staff ID and PIN', async () => {
 });
 
 test('login with the wrong PIN and login with an unknown staff ID give identical errors', async () => {
-  const { shopId, staffIdCode } = await setupStaff();
+  const { staffIdCode } = await setupStaff();
 
   const wrongPin = await request(app)
     .post('/api/staff-auth/login')
-    .send({ shopId, staffIdCode, pin: '99999999' });
+    .send({ staffIdCode, pin: '99999999' });
   const unknownId = await request(app)
     .post('/api/staff-auth/login')
-    .send({ shopId, staffIdCode: '00000000', pin: KNOWN_PIN });
+    .send({ staffIdCode: '00000000', pin: KNOWN_PIN });
 
   assert.equal(wrongPin.status, 401);
   assert.equal(unknownId.status, 401);
   assert.equal(wrongPin.body.error.message, unknownId.body.error.message);
 });
 
-test('login rejects a staffIdCode that is not 8 digits', async () => {
-  const { shopId } = await setupStaff();
+test('the same staffIdCode at two different shops each log in as their own staff member via their own distinct PIN', async () => {
+  // The actual point of dropping shopId from the request: staff_id_code is
+  // only unique PER SHOP, so two different shops legitimately having the
+  // same code must still each resolve to the right one via the PIN - the
+  // realistic case, since staffIdCode and pin are independently random and
+  // it's the PIN that actually disambiguates in practice.
+  const first = await setupStaff();
+  const second = await setupStaff();
+  const secondPin = '87654321';
+  const secondPinHash = await bcrypt.hash(secondPin, 4); // low cost - tests only
+  await query(`UPDATE staff SET staff_id_code = $1, pin_hash = $2 WHERE shop_id = $3`, [
+    first.staffIdCode,
+    secondPinHash,
+    second.shopId,
+  ]);
+
+  const firstRes = await request(app)
+    .post('/api/staff-auth/login')
+    .send({ staffIdCode: first.staffIdCode, pin: KNOWN_PIN });
+  const secondRes = await request(app)
+    .post('/api/staff-auth/login')
+    .send({ staffIdCode: first.staffIdCode, pin: secondPin });
+
+  assert.equal(firstRes.status, 200);
+  assert.equal(firstRes.body.staff.shopId, first.shopId);
+  assert.equal(secondRes.status, 200);
+  assert.equal(secondRes.body.staff.shopId, second.shopId);
+});
+
+test('a login matching more than one staff record (same code AND same PIN, across shops) is refused rather than silently picking one', async () => {
+  // Simulates the ~1-in-10^16 coincidence of two fully-random 8-digit
+  // staffIdCode/pin pairs colliding across shops (staffAuth.service.js's own
+  // doc explains why this can only happen by chance, never be engineered).
+  // Refused rather than granting a session at an arbitrary one of the two -
+  // the repository query defines no order, so "the first row back" is not a
+  // real choice between two people, and silently authenticating as the
+  // wrong shop's staff member is the worse failure mode.
+  const first = await setupStaff();
+  const second = await setupStaff();
+  await query(`UPDATE staff SET staff_id_code = $1 WHERE shop_id = $2`, [
+    first.staffIdCode,
+    second.shopId,
+  ]);
 
   const res = await request(app)
     .post('/api/staff-auth/login')
-    .send({ shopId, staffIdCode: '123', pin: KNOWN_PIN });
+    .send({ staffIdCode: first.staffIdCode, pin: KNOWN_PIN });
+
+  assert.equal(res.status, 401);
+  assert.equal(await activeSessionCount(first.shopId), 0);
+  assert.equal(await activeSessionCount(second.shopId), 0);
+});
+
+test('login rejects a staffIdCode that is not 8 digits', async () => {
+  await setupStaff();
+
+  const res = await request(app)
+    .post('/api/staff-auth/login')
+    .send({ staffIdCode: '123', pin: KNOWN_PIN });
 
   assert.equal(res.status, 400);
 });
 
 test('login is blocked with 402 when the company is billing-locked', async () => {
-  const { shopId, staffIdCode } = await setupStaff({ locked: true });
+  const { staffIdCode } = await setupStaff({ locked: true });
 
   const res = await request(app)
     .post('/api/staff-auth/login')
-    .send({ shopId, staffIdCode, pin: KNOWN_PIN });
+    .send({ staffIdCode, pin: KNOWN_PIN });
 
   assert.equal(res.status, 402);
 });
@@ -120,7 +173,7 @@ test('logout revokes the session', async () => {
   const { shopId, staffIdCode } = await setupStaff();
   const loginRes = await request(app)
     .post('/api/staff-auth/login')
-    .send({ shopId, staffIdCode, pin: KNOWN_PIN });
+    .send({ staffIdCode, pin: KNOWN_PIN });
   assert.equal(await activeSessionCount(shopId), 1);
 
   const logoutRes = await request(app)
@@ -142,9 +195,9 @@ test('logout with an already-invalid token is a no-op, not an error', async () =
 // --- Rate limiting ---
 
 test('login is rate-limited after repeated attempts', async () => {
-  const { shopId, staffIdCode } = await setupStaff();
+  const { staffIdCode } = await setupStaff();
   const attempt = () =>
-    request(app).post('/api/staff-auth/login').send({ shopId, staffIdCode, pin: '00000000' });
+    request(app).post('/api/staff-auth/login').send({ staffIdCode, pin: '00000000' });
 
   let lastStatus;
   for (let i = 0; i < 11; i += 1) {

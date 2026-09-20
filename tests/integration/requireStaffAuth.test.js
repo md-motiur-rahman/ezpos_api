@@ -38,7 +38,14 @@ async function setupStaff() {
     [companyRows[0].id, `si_test_${crypto.randomUUID().slice(0, 8)}`]
   );
   const pinHash = await bcrypt.hash(KNOWN_PIN, 4); // low cost - tests only
-  const staffIdCode = '10203040';
+  // Must be unique per call, not a fixed literal: staff login now resolves
+  // a shop by searching every staff row sharing this staffIdCode (no shopId
+  // in the request any more - staffAuth.service.js's `login` doc explains
+  // why), so a fixed code here would let this file's own leftover rows from
+  // an earlier test collide with a later one and resolve to the wrong shop
+  // - confirmed live, this was failing 4/5 tests in this file before this
+  // fix, each asserting on the wrong staff id.
+  const staffIdCode = String(crypto.randomInt(10_000_000, 99_999_999));
   const { rows: staffRows } = await query(
     `INSERT INTO staff (shop_id, full_name, role, staff_id_code, pin_hash)
      VALUES ($1, 'Test Staff', 'server', $2, $3)

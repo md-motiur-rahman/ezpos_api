@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { withTransaction } from '../../db/pool.js';
 import { AppError } from '../../utils/AppError.js';
 import { PERMISSIONS } from '../staff/permissions.js';
 import { resolveActorAuthority, assertHasPermission } from '../staff/actorAuthority.js';
@@ -1099,12 +1100,43 @@ function usesPlatformCardProcessing(company) {
  * on `status === 'open'` and simply stop matching. Not one line in those
  * three submodules had to change for that to take effect.
  *
- * KNOWN LIMITATION, deliberately accepted: the balance is read immediately
- * before the insert, not inside a transaction - this project has no
- * transaction wrapper anywhere (see CLAUDE.md section 2), and 9.5 does not
- * introduce one. Two genuinely simultaneous payments against the same order
- * could therefore both pass the balance check. Flagged rather than hidden;
- * the single-till reality this is built for makes it a narrow window.
+ * The response carries `createdPaymentId` alongside the usual order detail
+ * fields - the id of the row this exact call just inserted (already
+ * returned by createOrderPayment's own RETURNING clause; this was
+ * previously discarded). A frontend cash-payment flow needs to know
+ * precisely which of `payments[]` is the one it just made, to read back its
+ * authoritative `change` - and nothing else in the response can identify
+ * that unambiguously: `amountTendered` is not unique (two concurrent tills
+ * tendering the same amount are perfectly legitimate and now indistinguishable
+ * by amount alone), so an id is the only safe answer.
+ *
+ * **Serialized per-order, not read-then-write anymore.** Originally this
+ * read `balanceDue` and inserted the payment as two separate, unguarded
+ * statements - a documented, accepted "narrow window, single-till reality"
+ * limitation identical in shape to every other money/stock write in this
+ * project (9.6/9.7/10.3's own KNOWN LIMITATION notes). Reviewed again once
+ * the frontend actually needed to trust `change` for a specific payment
+ * (the `createdPaymentId` addition above) and found genuinely worth closing
+ * for money specifically: two truly concurrent `recordPayment` calls could
+ * both read the same balance and both credit against it, silently pushing
+ * `netAmountPaid` past `total` and handing back the wrong change to a real
+ * cashier - a correctness gap, not just a display one. Fixed with
+ * `db/pool.js`'s new `withTransaction` + `orderRepository.lockOrderForUpdate`
+ * (`SELECT ... FOR UPDATE` on the order row): a `FOR UPDATE` from a second,
+ * genuinely concurrent call now BLOCKS until this one commits or rolls
+ * back, so its own balance re-read always reflects this call's write.
+ * Deliberately scoped to this one endpoint, not a general "add transactions
+ * everywhere" shift - every other write in this project is unchanged and
+ * exactly as atomic (or not) as it already documented itself to be; this
+ * is the first place `db/pool.js`'s own `query` doc ("later modules...
+ * will add helpers alongside this one") anticipated actually needing one.
+ *
+ * The row lock is held for the WHOLE critical section, including the card
+ * provider call below - a real future provider integration (13.1) would
+ * want to weigh that against the DB connection it ties up for the length
+ * of an external HTTP round trip; today's placeholder provider is
+ * synchronous and instant, so it costs nothing yet, but it's worth
+ * revisiting once a real one exists.
  *
  * Inventory is deliberately NOT touched here - 10.3 owns the deduction
  * trigger (confirmed directly), so stock moves on a KDS event, not on
@@ -1114,82 +1146,120 @@ export async function recordPayment(actor, shopId, orderId, data) {
   await requireAccessTill(actor, shopId);
   const order = await getOrderOrThrow(shopId, orderId);
 
-  if (!PAYABLE_ORDER_STATUSES.includes(order.status)) {
-    throw new AppError(`Cannot take payment on an order with status '${order.status}'`, 400);
-  }
+  const { createdPayment } = await withTransaction(async (client) => {
+    // Blocks here until any OTHER transaction's own lock on this exact
+    // order has committed or rolled back - the one thing that actually
+    // makes the balance re-read below safe against a genuinely concurrent
+    // second call. A lock on an id that turned out not to exist would
+    // simply match zero rows; `getOrderOrThrow` above already confirmed
+    // this order exists and belongs to this shop, so that case can't
+    // happen here.
+    await orderRepository.lockOrderForUpdate(client, order.id);
 
-  // Reuses 9.3/9.4's already-correct derived total - discounts applied and
-  // voided items excluded - rather than recomputing any of that here.
-  const currentDetail = await fetchOrderDetail(shopId, order.id);
-  const balanceDue = currentDetail.balanceDue;
+    // Reuses 9.3/9.4's already-correct derived total - discounts applied
+    // and voided items excluded - rather than recomputing any of that
+    // here. Safe to read via the ordinary pool (not `client`) despite
+    // being inside this transaction: the lock above already guarantees no
+    // concurrent `recordPayment` call can be past ITS OWN lock wait to
+    // have written a competing payment in the meantime, so whatever this
+    // plain read sees is exactly as fresh as reading it through `client`
+    // would be.
+    const currentDetail = await fetchOrderDetail(shopId, order.id);
 
-  if (balanceDue <= 0) {
-    throw new AppError('This order has no outstanding balance to pay', 400);
-  }
-
-  // Cash may be over-tendered (confirmed directly); only what's actually
-  // owed is ever credited, and the difference comes back as change. Card
-  // has nothing to give change from, so overpaying is simply rejected.
-  let amountToCredit;
-  let amountTendered = null;
-  let providerReference = null;
-
-  if (data.method === 'cash') {
-    amountTendered = roundMoney(data.amountTendered);
-    amountToCredit = Math.min(amountTendered, balanceDue);
-  } else {
-    amountToCredit = roundMoney(data.amount);
-    if (amountToCredit > balanceDue) {
-      throw new AppError(
-        `Payment amount cannot exceed the outstanding balance (${balanceDue.toFixed(2)})`,
-        400
-      );
+    // Status is checked against currentDetail (fetched AFTER the lock
+    // above), never against the `order` snapshot read before this
+    // transaction even opened. That snapshot can go stale: a concurrent
+    // cancelOrder can commit its own status change in the window between
+    // getOrderOrThrow above and lockOrderForUpdate - it doesn't need to
+    // hold this lock itself, its own UPDATE just commits and releases
+    // before this call ever reaches it - so checking `order.status` here
+    // would silently accept a payment against an order that is actually
+    // already cancelled. balanceDue below can't catch that either: 9.4
+    // deliberately does NOT zero `total` on cancellation (status is the
+    // sole authoritative "not charged" signal), so a cancelled order's
+    // balanceDue is still its full total - comfortably > 0.
+    if (!PAYABLE_ORDER_STATUSES.includes(currentDetail.status)) {
+      throw new AppError(`Cannot take payment on an order with status '${currentDetail.status}'`, 400);
     }
 
-    // Companies using their OWN card terminal skip the provider entirely -
-    // the transaction is still recorded as 'card', it just has no provider
-    // reference, exactly like cash has none. Resolved from the SHOP, since a
-    // staff-authenticated till request never carries the owner's user id.
-    const company = await companyRepository.findCompanyByShopId(shopId);
-    if (usesPlatformCardProcessing(company)) {
-      // The provider is charged BEFORE anything is written - a failed charge
-      // must leave no payment row behind. (The reverse order would need a
-      // compensating delete, which is exactly the kind of partial-write
-      // cleanup this project has no transaction wrapper to make safe.)
-      const result = await paymentProvider.chargeCard({
-        amount: amountToCredit,
-        orderId: order.id,
-      });
-      if (!result.success) {
-        throw new AppError(result.failureReason ?? 'Card payment was declined', 402);
+    const balanceDue = currentDetail.balanceDue;
+    if (balanceDue <= 0) {
+      throw new AppError('This order has no outstanding balance to pay', 400);
+    }
+
+    // Cash may be over-tendered (confirmed directly); only what's actually
+    // owed is ever credited, and the difference comes back as change. Card
+    // has nothing to give change from, so overpaying is simply rejected.
+    let amountToCredit;
+    let amountTendered = null;
+    let providerReference = null;
+
+    if (data.method === 'cash') {
+      amountTendered = roundMoney(data.amountTendered);
+      amountToCredit = Math.min(amountTendered, balanceDue);
+    } else {
+      amountToCredit = roundMoney(data.amount);
+      if (amountToCredit > balanceDue) {
+        throw new AppError(
+          `Payment amount cannot exceed the outstanding balance (${balanceDue.toFixed(2)})`,
+          400
+        );
       }
-      providerReference = result.providerReference;
+
+      // Companies using their OWN card terminal skip the provider entirely -
+      // the transaction is still recorded as 'card', it just has no provider
+      // reference, exactly like cash has none. Resolved from the SHOP, since a
+      // staff-authenticated till request never carries the owner's user id.
+      const company = await companyRepository.findCompanyByShopId(shopId);
+      if (usesPlatformCardProcessing(company)) {
+        // The provider is charged BEFORE anything is written - a failed
+        // charge must leave no payment row behind. A throw here rolls
+        // back this whole transaction (nothing was written yet), so
+        // there is no compensating delete to get right.
+        const result = await paymentProvider.chargeCard({
+          amount: amountToCredit,
+          orderId: order.id,
+        });
+        if (!result.success) {
+          throw new AppError(result.failureReason ?? 'Card payment was declined', 402);
+        }
+        providerReference = result.providerReference;
+      }
     }
-  }
 
-  amountToCredit = roundMoney(amountToCredit);
+    amountToCredit = roundMoney(amountToCredit);
 
-  await orderRepository.createOrderPayment(order.id, {
-    method: data.method,
-    amount: amountToCredit,
-    amountTendered,
-    providerReference,
-    actorType: actor.type,
-    actorId: actor.id,
+    const createdPayment = await orderRepository.createOrderPayment(
+      order.id,
+      {
+        method: data.method,
+        amount: amountToCredit,
+        amountTendered,
+        providerReference,
+        actorType: actor.type,
+        actorId: actor.id,
+      },
+      client
+    );
+
+    // netAmountPaid rather than amountPaid (9.6): provably the SAME number
+    // here, because this function can only run on a 'open'/'partially_paid'
+    // order and any refund immediately moves the status to
+    // 'partially_refunded'/'refunded' - so amountRefunded is necessarily 0 on
+    // every order that reaches this line. Using the net figure keeps this
+    // correct by construction rather than by coincidence, should a later
+    // submodule ever make a refunded order payable again.
+    const newAmountPaid = roundMoney(currentDetail.netAmountPaid + amountToCredit);
+    const nextStatus = newAmountPaid >= currentDetail.total ? 'paid' : 'partially_paid';
+    await orderRepository.setOrderStatus(order.id, nextStatus, client);
+
+    return { createdPayment };
   });
 
-  // netAmountPaid rather than amountPaid (9.6): provably the SAME number
-  // here, because this function can only run on a 'open'/'partially_paid'
-  // order and any refund immediately moves the status to
-  // 'partially_refunded'/'refunded' - so amountRefunded is necessarily 0 on
-  // every order that reaches this line. Using the net figure keeps this
-  // correct by construction rather than by coincidence, should a later
-  // submodule ever make a refunded order payable again.
-  const newAmountPaid = roundMoney(currentDetail.netAmountPaid + amountToCredit);
-  const nextStatus = newAmountPaid >= currentDetail.total ? 'paid' : 'partially_paid';
-  await orderRepository.setOrderStatus(order.id, nextStatus);
-
-  return fetchOrderDetail(shopId, order.id);
+  const detail = await fetchOrderDetail(shopId, order.id);
+  // See this function's own doc - the one unambiguous way for a caller to
+  // know which row in `payments[]` this exact call just created.
+  return { ...detail, createdPaymentId: createdPayment.id };
 }
 
 /**

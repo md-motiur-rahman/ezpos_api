@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import bcrypt from 'bcrypt';
 import request from 'supertest';
 import app from '../../src/app.js';
-import { query } from '../../src/db/pool.js';
+import { query, pool } from '../../src/db/pool.js';
 import { signAccessToken } from '../../src/utils/jwt.js';
 import { enablePaymentMethod } from '../helpers/billing.js';
 
@@ -169,6 +169,38 @@ test('over-tendered cash credits only what is owed and returns the change', asyn
   assert.equal(res.body.payments[0].change, 10);
 });
 
+test('createdPaymentId identifies exactly the payment just created, even when amountTendered repeats', async () => {
+  const { header, shopId } = await setupOwnerWithShop();
+  const categoryId = await createCategory(header, 'Mains');
+  const itemId = await createMenuItem(header, categoryId, 'Feast', 20);
+  const order = await createOrder(header, shopId, {
+    type: 'takeaway',
+    items: [{ menuItemId: itemId, quantity: 1 }],
+  });
+
+  const first = await pay(header, shopId, order.id, { method: 'cash', amountTendered: 10 });
+  assert.equal(first.status, 201);
+  assert.equal(first.body.payments.length, 1);
+  assert.ok(first.body.createdPaymentId);
+  assert.equal(first.body.createdPaymentId, first.body.payments[0].id);
+
+  // Same amountTendered as the first payment - amountTendered alone cannot
+  // tell the two apart, which is exactly why createdPaymentId exists (a
+  // client matching payments by amountTendered instead could otherwise
+  // resolve back to the first, wrong, row here).
+  const second = await pay(header, shopId, order.id, { method: 'cash', amountTendered: 10 });
+  assert.equal(second.status, 201);
+  assert.equal(second.body.status, 'paid');
+  assert.equal(second.body.payments.length, 2);
+  assert.ok(second.body.createdPaymentId);
+  assert.notEqual(second.body.createdPaymentId, first.body.createdPaymentId);
+
+  const identified = second.body.payments.find((p) => p.id === second.body.createdPaymentId);
+  assert.ok(identified, 'createdPaymentId must reference a real row in payments[]');
+  assert.equal(identified.amountTendered, 10);
+  assert.equal(identified.change, 0);
+});
+
 test('partial cash payment moves the order to partially_paid', async () => {
   const { header, shopId } = await setupOwnerWithShop();
   const { order } = await tenPoundOrder(header, shopId);
@@ -206,6 +238,77 @@ test('a card payment exceeding the balance is rejected', async () => {
   const res = await pay(header, shopId, order.id, { method: 'card', amount: 10.01 });
 
   assert.equal(res.status, 400);
+});
+
+// --- Concurrency (the row-lock fix) ---
+
+test('two genuinely concurrent payments against the same order do not both succeed', async () => {
+  const { header, shopId } = await setupOwnerWithShop();
+  const { order } = await tenPoundOrder(header, shopId);
+
+  // Fired together via Promise.all, not awaited one after another - a real
+  // race at the DB level. Before the order-row lock, both requests could
+  // read the same £10 balance and both insert a full payment, pushing
+  // netAmountPaid to £20 against a £10 total.
+  const [first, second] = await Promise.all([
+    pay(header, shopId, order.id, { method: 'card', amount: 10 }),
+    pay(header, shopId, order.id, { method: 'card', amount: 10 }),
+  ]);
+
+  const statuses = [first.status, second.status].sort();
+  assert.deepEqual(statuses, [201, 400], 'exactly one must succeed - never both, never neither');
+
+  const successful = first.status === 201 ? first : second;
+  assert.equal(successful.body.status, 'paid');
+  assert.equal(successful.body.amountPaid, 10);
+  assert.equal(successful.body.balanceDue, 0);
+  assert.equal(successful.body.payments.length, 1);
+
+  // The status check now runs against currentDetail (fetched AFTER the
+  // lock), so the loser's re-read correctly sees the winner's already-
+  // committed 'paid' status and is rejected there, not by the balanceDue
+  // check further down - a more precise message for the same outcome.
+  const rejected = first.status === 400 ? first : second;
+  assert.match(rejected.body.error.message, /status 'paid'/);
+
+  // The definitive check: the order itself only ever holds ONE payment,
+  // confirmed independently of which response object is which above.
+  const finalOrder = await request(app)
+    .get(`/api/shops/${shopId}/orders/${order.id}`)
+    .set('Authorization', header);
+  assert.equal(finalOrder.body.payments.length, 1);
+  assert.equal(finalOrder.body.amountPaid, 10);
+});
+
+test('three concurrent partial cash payments settle the order exactly once, never over', async () => {
+  const { header, shopId } = await setupOwnerWithShop();
+  const { order } = await tenPoundOrder(header, shopId);
+
+  // Three requests, each tendering £4 against a £10 order, all fired at
+  // once. Sequentially this would be £4 + £4 + £2(capped) = £10 across
+  // three accepted payments. Racing them proves the lock doesn't just
+  // block a second writer - it correctly re-reads a FRESH balance for
+  // every serialized turn, not a snapshot from before the first write.
+  const results = await Promise.all([
+    pay(header, shopId, order.id, { method: 'cash', amountTendered: 4 }),
+    pay(header, shopId, order.id, { method: 'cash', amountTendered: 4 }),
+    pay(header, shopId, order.id, { method: 'cash', amountTendered: 4 }),
+  ]);
+
+  for (const res of results) {
+    assert.equal(res.status, 201, `every request against a big-enough balance should succeed: ${JSON.stringify(res.body)}`);
+  }
+
+  const finalOrder = await request(app)
+    .get(`/api/shops/${shopId}/orders/${order.id}`)
+    .set('Authorization', header);
+  assert.equal(finalOrder.body.status, 'paid');
+  assert.equal(finalOrder.body.amountPaid, 10, 'never more than the £10 total, regardless of £12 tendered across three racing payments');
+  assert.equal(finalOrder.body.balanceDue, 0);
+  assert.equal(finalOrder.body.payments.length, 3);
+
+  const totalChange = finalOrder.body.payments.reduce((sum, p) => sum + p.change, 0);
+  assert.equal(totalChange, 2, 'the £2 that could not be credited (£12 tendered - £10 owed) must come back as change somewhere, not vanish or double-credit');
 });
 
 // --- Split / partial payment ---
@@ -274,6 +377,69 @@ test('paying a cancelled order is rejected', async () => {
   const res = await pay(header, shopId, order.id, { method: 'cash', amountTendered: 10 });
 
   assert.equal(res.status, 400);
+});
+
+/**
+ * The above test only covers cancel-then-pay, fully sequential - the order
+ * is already 'cancelled' by the time recordPayment's very first read
+ * (getOrderOrThrow, BEFORE the transaction/lock even opens) happens, so it
+ * would pass even if that first read were (wrongly) what gated the payment.
+ *
+ * This test reproduces the actual race CodeRabbit flagged: a cancellation
+ * that commits AFTER recordPayment's pre-lock read but WHILE it is still
+ * waiting on lockOrderForUpdate. A naive Promise.all of two real HTTP
+ * requests can't reliably land in that exact window (cancelOrder has no
+ * lock of its own to force the interleaving), so - like this project's own
+ * empirical verification of 10.3's claim and the PO deletion/receiving
+ * mutual exclusion ("two overlapping transactions on separate connections,
+ * verified in both orderings") - a raw client holds the row lock open via
+ * an uncommitted UPDATE, so its COMMIT can be timed precisely against
+ * recordPayment's own progress.
+ */
+test('a cancellation that commits while a payment is mid-flight is not silently overwritten back to paid', async () => {
+  const { header, shopId } = await setupOwnerWithShop();
+  const { order } = await tenPoundOrder(header, shopId);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Uncommitted - holds the row lock open. recordPayment's own
+    // getOrderOrThrow (a plain SELECT, no FOR UPDATE) does NOT block on
+    // this under READ COMMITTED - it just reads the last COMMITTED
+    // snapshot, still 'open' - but its later lockOrderForUpdate
+    // (SELECT ... FOR UPDATE) does block, right where the real race would.
+    await client.query(`UPDATE orders SET status = 'cancelled', cancelled_at = now() WHERE id = $1`, [
+      order.id,
+    ]);
+
+    const payPromise = pay(header, shopId, order.id, { method: 'cash', amountTendered: 10 });
+
+    // Give recordPayment's pre-lock read time to complete and reach
+    // lockOrderForUpdate, where it then blocks behind this held lock.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    // Commits the cancellation and releases the lock - recordPayment's
+    // blocked lockOrderForUpdate now proceeds, and its OWN post-lock
+    // re-read (fetchOrderDetail) must see this committed change.
+    await client.query('COMMIT');
+
+    const payRes = await payPromise;
+
+    assert.equal(
+      payRes.status,
+      400,
+      'must check the fresh, lock-protected status, not the pre-lock snapshot taken before the transaction opened'
+    );
+    assert.match(payRes.body.error.message, /cancelled/);
+
+    const finalOrder = await request(app)
+      .get(`/api/shops/${shopId}/orders/${order.id}`)
+      .set('Authorization', header);
+    assert.equal(finalOrder.body.status, 'cancelled', 'must stay cancelled - never silently reverted to paid');
+    assert.equal(finalOrder.body.payments.length, 0, 'no payment row may be created against a cancelled order');
+  } finally {
+    client.release();
+  }
 });
 
 test('a partially-paid order is LOCKED against adding items (9.2 guard)', async () => {

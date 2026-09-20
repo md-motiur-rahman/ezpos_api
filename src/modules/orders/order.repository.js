@@ -362,12 +362,36 @@ export async function claimOrderItemForDeduction(orderItemId) {
 const PAYMENT_COLUMNS = `id, order_id, method, amount, amount_tendered, provider_reference,
                        paid_by_actor_type, paid_by_actor_id, created_at`;
 
-/** Immutable insert (9.5) - no update path, same as receipts/wastage/scans. */
+/**
+ * Locks the order row for the rest of the caller's transaction (9.5's
+ * payment race fix) - any OTHER transaction's own `FOR UPDATE` on the same
+ * `orderId` blocks until this one COMMITs or ROLLBACKs, which is what
+ * actually serializes two concurrent `recordPayment` calls against the
+ * same order; nothing else does. `client` MUST be the same one the caller
+ * already opened a transaction on (`db/pool.js`'s `withTransaction`) - this
+ * is a lock, not a value, so calling it against the shared pool instead
+ * would grab and release it in the same instant and serialize nothing.
+ * Returns nothing meaningful; callers already have the order from
+ * `getOrderOrThrow` and re-fetch its current state via the ordinary
+ * `fetchOrderDetail` once this resolves.
+ */
+export async function lockOrderForUpdate(client, orderId) {
+  await client.query('SELECT id FROM orders WHERE id = $1 FOR UPDATE', [orderId]);
+}
+
+/**
+ * Immutable insert (9.5) - no update path, same as receipts/wastage/scans.
+ * `client` defaults to the shared pool (every pre-existing caller:
+ * `syncOfflineOrder`) but `recordPayment` (9.5's own payment race fix)
+ * passes its transaction's own client instead, so this insert lands inside
+ * the same lock-held transaction as the balance check that approved it.
+ */
 export async function createOrderPayment(
   orderId,
-  { method, amount, amountTendered, providerReference, actorType, actorId }
+  { method, amount, amountTendered, providerReference, actorType, actorId },
+  client = { query }
 ) {
-  const { rows } = await query(
+  const { rows } = await client.query(
     `INSERT INTO order_payments
        (order_id, method, amount, amount_tendered, provider_reference,
         paid_by_actor_type, paid_by_actor_id)
@@ -402,9 +426,12 @@ export async function listPaymentsForOrder(orderId) {
  * clobber the other's fields. Reused unchanged by 9.6's refunds, which set
  * 'partially_refunded'/'refunded' through this same function, and by 9.7's
  * offline sync, which sets 'paid'/'partially_paid' exactly as 9.5 does.
+ * `client` defaults to the shared pool for those pre-existing callers;
+ * `recordPayment` passes its own transaction's client - same reasoning as
+ * `createOrderPayment`'s own doc above.
  */
-export async function setOrderStatus(orderId, status) {
-  const { rows } = await query(
+export async function setOrderStatus(orderId, status, client = { query }) {
+  const { rows } = await client.query(
     `UPDATE orders SET status = $2, updated_at = now() WHERE id = $1 RETURNING ${ORDER_COLUMNS}`,
     [orderId, status]
   );

@@ -21,6 +21,14 @@ import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
  * collide: with the order reversed, GET /attendance/comparison gets
  * swallowed by /:recordId (recordId = "comparison"), never reaching the
  * comparison handler at all.
+ *
+ * Deliberately NOT behind requireActiveBillingForShop, unlike rota.routes.js
+ * and swapRequest.routes.js's own writes: clocking in/out is a labor-law/
+ * wage-record necessity, not a discretionary shop-floor action a billing
+ * problem should ever be allowed to interrupt - an employee still
+ * physically shows up and works a shift regardless of whether their
+ * employer's own EzPOS subscription is current, and this app has no
+ * business standing between them and an accurate attendance record.
  */
 const router = Router({ mergeParams: true });
 

@@ -118,6 +118,38 @@ async function requireShopContext(actor, shopId) {
   return { authority, shop };
 }
 
+function toCategoryLabelResponse(category) {
+  return {
+    id: category.id,
+    name: category.name,
+    displayOrder: category.display_order,
+  };
+}
+
+/**
+ * Category **names** for the resolved menu's bare `categoryId` (Module
+ * 13/14, till category tiles) — deliberately a narrow `{ id, name,
+ * displayOrder }` shape, not the owner's full `menu.service.js`
+ * `toCategoryResponse` (`companyId`/`isActive`/timestamps are management
+ * concerns, not something a till needs to render a tile).
+ *
+ * Added specifically because `GET /api/companies/mine/menu-categories`
+ * (the only other place a category's name is readable) sits behind the
+ * owner-only `requireAuth` — confirmed directly, no staff-reachable route
+ * returned a category name anywhere before this. The resolved menu
+ * (`getResolvedMenu` above) already gives every item's bare `categoryId`;
+ * without this, a staff actor building an order has a UUID and nothing to
+ * label it with. Reuses `menu.repository.js`'s existing
+ * `listActiveCategoriesForCompany` as-is (the identical query the owner's
+ * own list endpoint already runs) rather than a second implementation —
+ * same company-scoped, non-deleted set either endpoint would return.
+ */
+export async function listCategoriesForShop(actor, shopId) {
+  const { shop } = await requireShopContext(actor, shopId);
+  const categories = await menuRepository.listActiveCategoriesForCompany(shop.company_id);
+  return categories.map(toCategoryLabelResponse);
+}
+
 /**
  * The resolved, ready-to-use menu: every master item (override applied if
  * one exists, else master defaults) plus every shop-local item, each tagged

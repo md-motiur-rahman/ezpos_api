@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireStaffOrOwnerAuth } from '../../middleware/requireStaffOrOwnerAuth.js';
+import { requireActiveBillingForShop } from '../../middleware/requireActiveBillingForShop.js';
 import { validateBody, validateParams } from '../../middleware/validate.js';
 import * as orderController from './order.controller.js';
 import {
@@ -31,6 +32,16 @@ import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
  * actions, not a resource deletion, and a refund (9.6) is a new record
  * rather than the removal of a payment, same "no reversal mechanism,
  * correct via a new action" philosophy as wastage/receipts.
+ *
+ * requireActiveBillingForShop gates every real till write here (create
+ * order, add items, both discount routes, cancel, void, payments, refund) -
+ * a business decision, applied deliberately per-route rather than at the
+ * router level, with two routes just as deliberately left off it: /sync
+ * (an offline sale already happened and was already paid for on the
+ * device - blocking its sync would strand a real, completed transaction
+ * behind a billing problem the till operator can't fix from a device with
+ * no connectivity) and the item-status route (a kitchen/KDS action, not a
+ * revenue one - see its own comment below).
  */
 const router = Router({ mergeParams: true });
 
@@ -38,6 +49,7 @@ router.use(requireStaffOrOwnerAuth);
 
 router.post(
   '/',
+  requireActiveBillingForShop,
   validateParams(shopIdOnlyParamSchema),
   validateBody(createOrderSchema),
   orderController.createOrder
@@ -58,6 +70,12 @@ router.get('/', validateParams(shopIdOnlyParamSchema), orderController.listOrder
 // and the idempotency key lives in the body rather than the URL (there is
 // no server-side path for a client-generated id). Replays are answered 200
 // vs a first sync's 201 - see the controller.
+//
+// Deliberately NOT behind requireActiveBillingForShop, unlike every other
+// write below - see this file's own module doc for why: the sale already
+// happened and was already paid for on a device with no connectivity;
+// blocking the sync would strand a real, completed transaction rather than
+// prevent a new billable one.
 router.post(
   '/sync',
   validateParams(shopIdOnlyParamSchema),
@@ -71,6 +89,7 @@ router.get('/:orderId', validateParams(orderIdParamSchema), orderController.getO
 
 router.post(
   '/:orderId/items',
+  requireActiveBillingForShop,
   validateParams(orderIdParamSchema),
   validateBody(addOrderItemsSchema),
   orderController.addItemsToOrder
@@ -80,6 +99,7 @@ router.post(
 
 router.patch(
   '/:orderId/discount',
+  requireActiveBillingForShop,
   validateParams(orderIdParamSchema),
   validateBody(discountInputSchema),
   orderController.setOrderDiscount
@@ -87,6 +107,7 @@ router.patch(
 
 router.patch(
   '/:orderId/items/:orderItemId/discount',
+  requireActiveBillingForShop,
   validateParams(orderItemIdParamSchema),
   validateBody(discountInputSchema),
   orderController.setOrderItemDiscount
@@ -96,6 +117,7 @@ router.patch(
 
 router.post(
   '/:orderId/cancel',
+  requireActiveBillingForShop,
   validateParams(orderIdParamSchema),
   validateBody(cancellationInputSchema),
   orderController.cancelOrder
@@ -103,6 +125,7 @@ router.post(
 
 router.post(
   '/:orderId/items/:orderItemId/void',
+  requireActiveBillingForShop,
   validateParams(orderItemIdParamSchema),
   validateBody(cancellationInputSchema),
   orderController.voidOrderItem
@@ -114,6 +137,10 @@ router.post(
 // (this permission's primary holder) has no till access. A PATCH, same verb
 // as 9.3's discount routes: this sets a field to an explicit value rather
 // than performing a one-directional business action the way cancel/void do.
+// Deliberately NOT behind requireActiveBillingForShop: this updates a
+// kitchen prep status on food already ordered and (usually) already paid
+// for, not a new billable action - a kitchen mid-service shouldn't have its
+// own workflow interrupted by a billing problem it has no way to fix.
 router.patch(
   '/:orderId/items/:orderItemId/status',
   validateParams(orderItemIdParamSchema),
@@ -127,6 +154,7 @@ router.patch(
 // once, same "multiple receipts per PO" precedent as 7.6.
 router.post(
   '/:orderId/payments',
+  requireActiveBillingForShop,
   validateParams(orderIdParamSchema),
   validateBody(paymentInputSchema),
   orderController.recordPayment
@@ -143,6 +171,7 @@ router.post(
 // (the /latest-before-/:scanId lesson from 8.3).
 router.post(
   '/:orderId/payments/:paymentId/refund',
+  requireActiveBillingForShop,
   validateParams(paymentIdParamSchema),
   validateBody(refundInputSchema),
   orderController.refundPayment

@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireStaffOrOwnerAuth } from '../../middleware/requireStaffOrOwnerAuth.js';
+import { requireActiveBillingForShop } from '../../middleware/requireActiveBillingForShop.js';
 import { validateBody, validateParams } from '../../middleware/validate.js';
 import * as wastageLogController from './wastageLog.controller.js';
 import { createWastageLogSchema, wastageLogIdParamSchema } from './wastageLog.validation.js';
@@ -18,6 +19,9 @@ import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
  * receipts: this represents an already-applied stock decrement. Correcting
  * a mistaken entry goes through 7.1's existing manual quantityOnHand
  * correction, not a reversal mechanism here.
+ *
+ * requireActiveBillingForShop gates the one write below - reads stay open
+ * regardless of billing state.
  */
 const router = Router({ mergeParams: true });
 
@@ -25,6 +29,7 @@ router.use(requireStaffOrOwnerAuth);
 
 router.post(
   '/',
+  requireActiveBillingForShop,
   validateParams(shopIdOnlyParamSchema),
   validateBody(createWastageLogSchema),
   wastageLogController.createWastageLog

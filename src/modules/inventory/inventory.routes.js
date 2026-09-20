@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireStaffOrOwnerAuth } from '../../middleware/requireStaffOrOwnerAuth.js';
+import { requireActiveBillingForShop } from '../../middleware/requireActiveBillingForShop.js';
 import { validateBody, validateParams, validateQuery } from '../../middleware/validate.js';
 import * as inventoryController from './inventory.controller.js';
 import {
@@ -28,6 +29,10 @@ import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
  * Unlike Module 6's menu, reads are NOT open to every in-scope actor here -
  * VIEW_INVENTORY is checked in the service layer for every route, including
  * GET, since stock levels are back-of-house rather than customer-facing.
+ *
+ * requireActiveBillingForShop gates every write below (create/update/delete
+ * an item, every supplier/ingredient link) - reads stay open regardless of
+ * billing state, same split as every other newly-gated module.
  */
 const router = Router({ mergeParams: true });
 
@@ -35,6 +40,7 @@ router.use(requireStaffOrOwnerAuth);
 
 router.post(
   '/',
+  requireActiveBillingForShop,
   validateParams(shopIdOnlyParamSchema),
   validateBody(createInventoryItemSchema),
   inventoryController.createItem
@@ -48,16 +54,23 @@ router.get(
 router.get('/:itemId', validateParams(inventoryItemIdParamSchema), inventoryController.getItem);
 router.patch(
   '/:itemId',
+  requireActiveBillingForShop,
   validateParams(inventoryItemIdParamSchema),
   validateBody(updateInventoryItemSchema),
   inventoryController.updateItem
 );
-router.delete('/:itemId', validateParams(inventoryItemIdParamSchema), inventoryController.deleteItem);
+router.delete(
+  '/:itemId',
+  requireActiveBillingForShop,
+  validateParams(inventoryItemIdParamSchema),
+  inventoryController.deleteItem
+);
 
 // --- Item <-> supplier linking (7.4) ---
 
 router.post(
   '/:itemId/suppliers/:supplierId',
+  requireActiveBillingForShop,
   validateParams(itemSupplierParamSchema),
   validateBody(attachSupplierBodySchema),
   inventoryController.attachSupplierToItem
@@ -69,12 +82,14 @@ router.get(
 );
 router.patch(
   '/:itemId/suppliers/:supplierId',
+  requireActiveBillingForShop,
   validateParams(itemSupplierParamSchema),
   validateBody(updateItemSupplierBodySchema),
   inventoryController.updateItemSupplierDefault
 );
 router.delete(
   '/:itemId/suppliers/:supplierId',
+  requireActiveBillingForShop,
   validateParams(itemSupplierParamSchema),
   inventoryController.detachSupplierFromItem
 );
@@ -89,6 +104,7 @@ router.delete(
 
 router.post(
   '/:itemId/ingredient-links/:ingredientId',
+  requireActiveBillingForShop,
   validateParams(itemIngredientParamSchema),
   validateBody(linkIngredientBodySchema),
   inventoryController.linkIngredientToItem
@@ -100,12 +116,14 @@ router.get(
 );
 router.patch(
   '/:itemId/ingredient-links/:ingredientId',
+  requireActiveBillingForShop,
   validateParams(itemIngredientParamSchema),
   validateBody(updateIngredientLinkBodySchema),
   inventoryController.updateIngredientLink
 );
 router.delete(
   '/:itemId/ingredient-links/:ingredientId',
+  requireActiveBillingForShop,
   validateParams(itemIngredientParamSchema),
   inventoryController.unlinkIngredientFromItem
 );

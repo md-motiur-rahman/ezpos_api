@@ -6,6 +6,11 @@ export const getResolvedMenu = asyncHandler(async (req, res) => {
   res.status(200).json(menu);
 });
 
+export const listCategories = asyncHandler(async (req, res) => {
+  const categories = await shopMenuService.listCategoriesForShop(req.actor, req.params.shopId);
+  res.status(200).json(categories);
+});
+
 export const setOverride = asyncHandler(async (req, res) => {
   const override = await shopMenuService.setOverride(
     req.actor,

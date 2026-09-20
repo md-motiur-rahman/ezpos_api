@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireStaffOrOwnerAuth } from '../../middleware/requireStaffOrOwnerAuth.js';
+import { requireActiveBillingForShop } from '../../middleware/requireActiveBillingForShop.js';
 import { validateBody, validateParams, validateQuery } from '../../middleware/validate.js';
 import * as swapRequestController from './swapRequest.controller.js';
 import {
@@ -17,6 +18,11 @@ import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
  *
  * mergeParams: true required even for this top-level mount - verified
  * empirically in 4.5.
+ *
+ * requireActiveBillingForShop gates every write below (create, approve,
+ * reject) - same rota-adjacent reversal `rota.routes.js`'s own doc
+ * explains, applied here too rather than left inconsistent with it. Reads
+ * stay open regardless of billing state.
  */
 const router = Router({ mergeParams: true });
 
@@ -24,6 +30,7 @@ router.use(requireStaffOrOwnerAuth);
 
 router.post(
   '/',
+  requireActiveBillingForShop,
   validateParams(shopIdOnlyParamSchema),
   validateBody(createSwapRequestSchema),
   swapRequestController.createSwapRequest
@@ -37,11 +44,13 @@ router.get(
 router.get('/:requestId', validateParams(requestIdParamSchema), swapRequestController.getSwapRequest);
 router.post(
   '/:requestId/approve',
+  requireActiveBillingForShop,
   validateParams(requestIdParamSchema),
   swapRequestController.approveSwapRequest
 );
 router.post(
   '/:requestId/reject',
+  requireActiveBillingForShop,
   validateParams(requestIdParamSchema),
   swapRequestController.rejectSwapRequest
 );

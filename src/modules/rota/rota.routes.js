@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireStaffOrOwnerAuth } from '../../middleware/requireStaffOrOwnerAuth.js';
+import { requireActiveBillingForShop } from '../../middleware/requireActiveBillingForShop.js';
 import { validateBody, validateParams, validateQuery } from '../../middleware/validate.js';
 import * as rotaController from './rota.controller.js';
 import {
@@ -18,8 +19,13 @@ import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
  * mergeParams: true is required even for this top-level mount - verified
  * empirically in 4.5 that Express doesn't populate :shopId without it.
  *
- * Not behind requireActiveBilling: the rota isn't a metered/billable
- * resource in this system.
+ * REVERSED, deliberately, not an oversight: this router previously stated
+ * "not behind requireActiveBilling: the rota isn't a metered/billable
+ * resource" - true as far as it went, but a separate later business
+ * decision widened billing enforcement to real shop-floor write actions
+ * once billing is locked, rota shifts included. requireActiveBillingForShop
+ * below gates create/update/delete - reads stay open regardless of billing
+ * state, same split as every other newly-gated module.
  */
 const router = Router({ mergeParams: true });
 
@@ -27,6 +33,7 @@ router.use(requireStaffOrOwnerAuth);
 
 router.post(
   '/',
+  requireActiveBillingForShop,
   validateParams(shopIdOnlyParamSchema),
   validateBody(createShiftSchema),
   rotaController.createShift
@@ -40,10 +47,16 @@ router.get(
 router.get('/:shiftId', validateParams(shiftIdParamSchema), rotaController.getShift);
 router.patch(
   '/:shiftId',
+  requireActiveBillingForShop,
   validateParams(shiftIdParamSchema),
   validateBody(updateShiftSchema),
   rotaController.updateShift
 );
-router.delete('/:shiftId', validateParams(shiftIdParamSchema), rotaController.deleteShift);
+router.delete(
+  '/:shiftId',
+  requireActiveBillingForShop,
+  validateParams(shiftIdParamSchema),
+  rotaController.deleteShift
+);
 
 export default router;

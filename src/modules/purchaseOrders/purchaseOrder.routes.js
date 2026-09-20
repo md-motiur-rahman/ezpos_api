@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireStaffOrOwnerAuth } from '../../middleware/requireStaffOrOwnerAuth.js';
+import { requireActiveBillingForShop } from '../../middleware/requireActiveBillingForShop.js';
 import { validateBody, validateParams } from '../../middleware/validate.js';
 import * as purchaseOrderController from './purchaseOrder.controller.js';
 import { createPurchaseOrderSchema, purchaseOrderIdParamSchema, createReceiptSchema } from './purchaseOrder.validation.js';
@@ -14,6 +15,9 @@ import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
  * Logging only - no PATCH route. Same shape as 4.6's staff audit log:
  * append-only, corrected by deleting and re-logging, not by editing
  * history in place.
+ *
+ * requireActiveBillingForShop gates every write below (create, delete,
+ * receive stock) - reads stay open regardless of billing state.
  */
 const router = Router({ mergeParams: true });
 
@@ -21,6 +25,7 @@ router.use(requireStaffOrOwnerAuth);
 
 router.post(
   '/',
+  requireActiveBillingForShop,
   validateParams(shopIdOnlyParamSchema),
   validateBody(createPurchaseOrderSchema),
   purchaseOrderController.createPurchaseOrder
@@ -29,6 +34,7 @@ router.get('/', validateParams(shopIdOnlyParamSchema), purchaseOrderController.l
 router.get('/:poId', validateParams(purchaseOrderIdParamSchema), purchaseOrderController.getPurchaseOrder);
 router.delete(
   '/:poId',
+  requireActiveBillingForShop,
   validateParams(purchaseOrderIdParamSchema),
   purchaseOrderController.deletePurchaseOrder
 );
@@ -37,6 +43,7 @@ router.delete(
 
 router.post(
   '/:poId/receipts',
+  requireActiveBillingForShop,
   validateParams(purchaseOrderIdParamSchema),
   validateBody(createReceiptSchema),
   purchaseOrderController.createReceipt

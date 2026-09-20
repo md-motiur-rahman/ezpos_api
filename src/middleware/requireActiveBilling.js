@@ -15,10 +15,19 @@ import { isBillingLocked } from '../modules/billing/billing.access.js';
  * written to be shown to the owner directly - it has to tell them what to do,
  * not just that they were refused.
  *
- * NOTE (Modules 4 and 9): this resolves the company from req.user.id, i.e. the
- * OWNER's account. Once till/staff PIN auth exists, staff-authenticated requests
- * will need the company resolved via staff -> shop -> company instead, so this
- * will need a second path rather than being reused as-is.
+ * RESOLVED: this resolves the company from req.user.id, i.e. the OWNER's
+ * account - correct here because every route this runs on today
+ * (shop.routes.js, shopAddon.routes.js, and now menu.routes.js's own writes)
+ * sits under requireAuth (owner JWT only), with no shopId in the URL at all
+ * for menu.routes.js to resolve a shop-scoped company from instead. Once
+ * till/staff PIN auth needed the identical billing check on shop-scoped,
+ * staff-reachable routes (orders, inventory, staff, ...), that turned out not
+ * to need branching on actor type here at all - see the sibling
+ * requireActiveBillingForShop.js, which resolves the company from
+ * req.params.shopId (present regardless of actor type on every shop-scoped
+ * router) instead of from an owner-only req.user.id. Two middlewares, not one
+ * with a branch, because the two resolution paths have nothing in common
+ * beyond both ending in the same isBillingLocked(company) check.
  */
 export async function requireActiveBilling(req, res, next) {
   try {

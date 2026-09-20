@@ -40,3 +40,8 @@ export const createBillingCheckoutSession = asyncHandler(async (req, res) => {
   const session = await companyService.createBillingCheckoutSession(req.user.id);
   res.status(201).json(session);
 });
+
+export const getDashboardSummary = asyncHandler(async (req, res) => {
+  const summary = await companyService.getDashboardSummary(req.user.id, req.query);
+  res.status(200).json(summary);
+});

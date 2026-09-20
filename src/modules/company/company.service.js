@@ -4,6 +4,7 @@ import {
   listInvoices,
   createSetupCheckoutSession,
 } from '../../utils/stripe.js';
+import { roundMoney } from '../../utils/money.js';
 import * as companyRepository from './company.repository.js';
 import * as shopService from '../shop/shop.service.js';
 
@@ -169,4 +170,76 @@ export async function createBillingCheckoutSession(ownerUserId) {
 
   const session = await createSetupCheckoutSession({ customerId: company.stripe_customer_id });
   return { url: session.url };
+}
+
+/**
+ * Dashboard home (Module 15.1). `companyRepository.getDashboardSummary`'s
+ * own doc covers what "revenue"/"expense" mean here and why they're each
+ * aggregated in isolated CTEs. `totals` is summed here in JS from the
+ * already-correct per-day `series` rows rather than a separate SQL SUM
+ * query — each row is an exact `numeric` value (pg returns it as a string;
+ * `Number()` below is the same parse-not-recompute convention
+ * `purchaseOrder.service.js` already uses for `totalCost`), so summing them
+ * is exact, not a re-derivation from raw truth the way client-side money
+ * math is (§2's rule targets the frontend recombining raw fields it
+ * shouldn't trust; this is the backend finishing its own aggregate).
+ *
+ * **The JS `+=` accumulation itself is NOT exact, though each addend is** -
+ * confirmed directly (CodeRabbit) and verified empirically: `Number('10.10')
+ * + Number('20.20')` is `30.299999999999997` in IEEE-754, not `30.3`, purely
+ * from summing two clean 2dp values - not a corner case, the ordinary
+ * result of adding decimal fractions in binary floating point. Individual
+ * `series`/`shopBreakdown` rows never go through this (each is a single
+ * `Number()` parse of one exact SQL numeric, no JS arithmetic combining
+ * them), so they're left alone; only the JS-summed `totals` figures
+ * (`revenue`, `expense`, and the `net` subtraction) are run through
+ * `roundMoney` before being returned - the same "settle to 2dp, kill the
+ * noise before it reaches a response" discipline `order.service.js`
+ * already applies to every payment/refund/VAT figure it returns.
+ *
+ * **`shopCount` is `shopBreakdown.length`, not a separate count query** —
+ * the breakdown already lists every active shop for this company (it's a
+ * LEFT JOIN FROM shops, so a shop with zero activity in range still gets a
+ * row with `revenue: 0`), so counting it again would just be a second query
+ * for the same fact.
+ */
+export async function getDashboardSummary(ownerUserId, { days }) {
+  const company = await getActiveCompanyOrThrow(ownerUserId);
+  const { series, shopBreakdown } = await companyRepository.getDashboardSummary(company.id, days);
+
+  const parsedSeries = series.map((row) => ({
+    date: row.day,
+    revenue: Number(row.revenue),
+    expense: Number(row.expense),
+    orderCount: row.order_count,
+  }));
+
+  const totals = parsedSeries.reduce(
+    (acc, row) => {
+      acc.revenue += row.revenue;
+      acc.expense += row.expense;
+      acc.orderCount += row.orderCount;
+      return acc;
+    },
+    { revenue: 0, expense: 0, orderCount: 0 }
+  );
+  totals.revenue = roundMoney(totals.revenue);
+  totals.expense = roundMoney(totals.expense);
+  totals.net = roundMoney(totals.revenue - totals.expense);
+
+  const parsedShopBreakdown = shopBreakdown
+    .map((row) => ({
+      shopId: row.shop_id,
+      shopName: row.shop_name,
+      revenue: Number(row.revenue),
+    }))
+    .sort((a, b) => b.revenue - a.revenue);
+
+  return {
+    days,
+    shopCount: parsedShopBreakdown.length,
+    series: parsedSeries,
+    shopBreakdown: parsedShopBreakdown,
+    totals,
+  };
 }

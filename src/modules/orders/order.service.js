@@ -12,28 +12,12 @@ import { broadcastOrderEvent, KDS_EVENTS } from '../kds/kdsSocket.js';
 import { toKdsOrderView } from '../kds/kdsOrderView.js';
 import { deductInventoryForSale } from '../inventory/saleDeduction.service.js';
 import { logger } from '../../utils/logger.js';
+import { toMoney, roundMoney } from '../../utils/money.js';
 import {
   PAYABLE_ORDER_STATUSES,
   REFUNDABLE_ORDER_STATUSES,
   INVENTORY_DEDUCTION_STATUSES,
 } from './orderConstants.js';
-
-/**
- * Every monetary value out of `pg` arrives as a STRING, not a number
- * (numeric columns always do) - verified empirically before this submodule
- * was built, because the failure mode is silent and expensive: "10.00" +
- * "5.55" evaluates to the string "10.005.55" rather than 15.55, with no
- * error anywhere. Every amount is funnelled through here before any
- * arithmetic touches it.
- */
-function toMoney(value) {
-  return Number(value ?? 0);
-}
-
-/** Money is always settled to 2dp - kills IEEE-754 noise (0.1 + 0.2 = 0.30000000000000004) before it reaches a response or the DB. */
-function roundMoney(value) {
-  return Number(value.toFixed(2));
-}
 
 /**
  * The calendar day an order number is drawn from, as 'YYYY-MM-DD'.

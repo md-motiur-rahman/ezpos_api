@@ -379,3 +379,257 @@ test('billing-history is accessible even when the company is billing-locked', as
   assert.equal(res.status, 200);
   assert.equal(res.body.invoices.length, 2);
 });
+
+// --- GET /api/companies/mine/dashboard-summary (Module 15.1) ---
+
+async function insertShop(companyId, name = 'Test Shop') {
+  const { rows } = await query(
+    `INSERT INTO shops (company_id, name, address_line1, city, postcode, country, phone, vat_registered)
+     VALUES ($1, $2, '1 St', 'London', 'E1 1AA', 'UK', '02012345678', true)
+     RETURNING id`,
+    [companyId, name]
+  );
+  return rows[0].id;
+}
+
+async function insertOrder(shopId, createdAt) {
+  const { rows } = await query(
+    `INSERT INTO orders (shop_id, type, created_by_actor_type, created_by_actor_id, created_at, updated_at)
+     VALUES ($1, 'takeaway', 'owner', $2, $3, $3)
+     RETURNING id`,
+    [shopId, crypto.randomUUID(), createdAt]
+  );
+  return rows[0].id;
+}
+
+async function insertPayment(orderId, amount, createdAt) {
+  const { rows } = await query(
+    `INSERT INTO order_payments (order_id, method, amount, paid_by_actor_type, paid_by_actor_id, created_at)
+     VALUES ($1, 'cash', $2, 'owner', $3, $4)
+     RETURNING id`,
+    [orderId, amount, crypto.randomUUID(), createdAt]
+  );
+  return rows[0].id;
+}
+
+async function insertRefund(paymentId, amount, createdAt) {
+  await query(
+    `INSERT INTO order_refunds (payment_id, amount, refunded_by_actor_type, refunded_by_actor_id, created_at)
+     VALUES ($1, $2, 'owner', $3, $4)`,
+    [paymentId, amount, crypto.randomUUID(), createdAt]
+  );
+}
+
+async function insertPurchaseOrderWithCost(shopId, supplierId, inventoryItemId, cost, orderedAt) {
+  const { rows } = await query(
+    `INSERT INTO purchase_orders (shop_id, supplier_id, ordered_at) VALUES ($1, $2, $3) RETURNING id`,
+    [shopId, supplierId, orderedAt]
+  );
+  await query(
+    `INSERT INTO purchase_order_items (purchase_order_id, inventory_item_id, quantity, unit_cost)
+     VALUES ($1, $2, 1, $3)`,
+    [rows[0].id, inventoryItemId, cost]
+  );
+}
+
+async function insertSupplier(shopId) {
+  const { rows } = await query(`INSERT INTO suppliers (shop_id, name) VALUES ($1, 'Test Supplier') RETURNING id`, [
+    shopId,
+  ]);
+  return rows[0].id;
+}
+
+async function insertInventoryItem(shopId) {
+  const { rows } = await query(
+    `INSERT INTO inventory_items (shop_id, name, unit) VALUES ($1, 'Test Item', 'each') RETURNING id`,
+    [shopId]
+  );
+  return rows[0].id;
+}
+
+function daysAgo(n) {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - n);
+  return d;
+}
+
+test('dashboard-summary rejects requests with no auth token', async () => {
+  const res = await request(app).get('/api/companies/mine/dashboard-summary');
+
+  assert.equal(res.status, 401);
+});
+
+test('dashboard-summary returns 404 with no active company', async () => {
+  const userId = await insertUser();
+
+  const res = await request(app)
+    .get('/api/companies/mine/dashboard-summary')
+    .set('Authorization', authHeaderFor(userId));
+
+  assert.equal(res.status, 404);
+});
+
+test('dashboard-summary rejects an out-of-range days value', async () => {
+  const userId = await insertUser();
+  await request(app).post('/api/companies').set('Authorization', authHeaderFor(userId)).send(VALID_COMPANY);
+
+  const res = await request(app)
+    .get('/api/companies/mine/dashboard-summary?days=91')
+    .set('Authorization', authHeaderFor(userId));
+
+  assert.equal(res.status, 400);
+});
+
+test('dashboard-summary returns a zeroed series and no shops for a company with none yet', async () => {
+  const userId = await insertUser();
+  await request(app).post('/api/companies').set('Authorization', authHeaderFor(userId)).send(VALID_COMPANY);
+
+  const res = await request(app)
+    .get('/api/companies/mine/dashboard-summary?days=7')
+    .set('Authorization', authHeaderFor(userId));
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.shopCount, 0);
+  assert.deepEqual(res.body.shopBreakdown, []);
+  assert.equal(res.body.series.length, 7);
+  assert.ok(res.body.series.every((day) => day.revenue === 0 && day.expense === 0));
+  assert.deepEqual(res.body.totals, { revenue: 0, expense: 0, orderCount: 0, net: 0 });
+});
+
+test('dashboard-summary nets revenue against refunds, sums purchase-order cost as expense, and excludes activity outside the window', async () => {
+  const userId = await insertUser();
+  const header = authHeaderFor(userId);
+  const createRes = await request(app).post('/api/companies').set('Authorization', header).send(VALID_COMPANY);
+  const companyId = createRes.body.id;
+  const shopId = await insertShop(companyId);
+  const supplierId = await insertSupplier(shopId);
+  const itemId = await insertInventoryItem(shopId);
+
+  // Today: a £50 payment partially refunded £20 -> £30 net revenue, plus a
+  // £12 purchase-order cost.
+  const orderToday = await insertOrder(shopId, daysAgo(0));
+  const paymentToday = await insertPayment(orderToday, 50, daysAgo(0));
+  await insertRefund(paymentToday, 20, daysAgo(0));
+  await insertPurchaseOrderWithCost(shopId, supplierId, itemId, 12, daysAgo(0));
+
+  // Outside the 7-day window - must not be counted.
+  const orderOld = await insertOrder(shopId, daysAgo(30));
+  await insertPayment(orderOld, 999, daysAgo(30));
+  await insertPurchaseOrderWithCost(shopId, supplierId, itemId, 999, daysAgo(30));
+
+  const res = await request(app)
+    .get('/api/companies/mine/dashboard-summary?days=7')
+    .set('Authorization', header);
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.shopCount, 1);
+  assert.equal(res.body.series.length, 7);
+  const todayRow = res.body.series[res.body.series.length - 1];
+  assert.equal(todayRow.revenue, 30);
+  assert.equal(todayRow.expense, 12);
+  assert.equal(todayRow.orderCount, 1);
+  assert.equal(res.body.totals.revenue, 30);
+  assert.equal(res.body.totals.expense, 12);
+  assert.equal(res.body.totals.net, 18);
+  assert.equal(res.body.totals.orderCount, 1);
+  assert.equal(res.body.shopBreakdown.length, 1);
+  assert.equal(res.body.shopBreakdown[0].shopId, shopId);
+  assert.equal(res.body.shopBreakdown[0].revenue, 30);
+});
+
+test('dashboard-summary ranks shopBreakdown by revenue, highest first', async () => {
+  const userId = await insertUser();
+  const header = authHeaderFor(userId);
+  const createRes = await request(app).post('/api/companies').set('Authorization', header).send(VALID_COMPANY);
+  const companyId = createRes.body.id;
+  const quietShop = await insertShop(companyId, 'Quiet Shop');
+  const busyShop = await insertShop(companyId, 'Busy Shop');
+
+  const quietOrder = await insertOrder(quietShop, daysAgo(0));
+  await insertPayment(quietOrder, 10, daysAgo(0));
+  const busyOrder = await insertOrder(busyShop, daysAgo(0));
+  await insertPayment(busyOrder, 500, daysAgo(0));
+
+  const res = await request(app)
+    .get('/api/companies/mine/dashboard-summary?days=7')
+    .set('Authorization', header);
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.shopBreakdown[0].shopId, busyShop);
+  assert.equal(res.body.shopBreakdown[1].shopId, quietShop);
+});
+
+test('dashboard-summary is accessible even when the company is billing-locked', async () => {
+  const userId = await insertUser();
+  const header = authHeaderFor(userId);
+  await request(app).post('/api/companies').set('Authorization', header).send(VALID_COMPANY);
+  await query(
+    `UPDATE companies SET subscription_status = 'past_due',
+            grace_period_ends_at = now() - interval '1 day'
+     WHERE owner_user_id = $1`,
+    [userId]
+  );
+
+  const res = await request(app).get('/api/companies/mine/dashboard-summary').set('Authorization', header);
+
+  assert.equal(res.status, 200);
+});
+
+test('dashboard-summary totals are exact, not raw IEEE-754 noise, when summing across days', async () => {
+  // The classic case, empirically confirmed before this fix: Number('10.10')
+  // + Number('20.20') is 30.299999999999997 in plain JS float arithmetic,
+  // not 30.3 - not a corner case, the ordinary result of summing decimal
+  // fractions in binary floating point. Spread across two different days so
+  // the sum genuinely happens in JS (company.service.js), not in SQL.
+  const userId = await insertUser();
+  const header = authHeaderFor(userId);
+  const createRes = await request(app).post('/api/companies').set('Authorization', header).send(VALID_COMPANY);
+  const shopId = await insertShop(createRes.body.id);
+
+  const orderToday = await insertOrder(shopId, daysAgo(0));
+  await insertPayment(orderToday, 10.1, daysAgo(0));
+  const orderYesterday = await insertOrder(shopId, daysAgo(1));
+  await insertPayment(orderYesterday, 20.2, daysAgo(1));
+
+  const res = await request(app)
+    .get('/api/companies/mine/dashboard-summary?days=7')
+    .set('Authorization', header);
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.totals.revenue, 30.3);
+  assert.equal(res.body.totals.net, 30.3);
+  // The raw response body text (before JSON parsing folds it back) is where
+  // the noise would actually be visible to a real client - asserting
+  // against the parsed number alone could pass even if node's JSON parser
+  // happened to mask a difference, so this checks the wire format too.
+  assert.match(res.text, /"revenue":30\.3[,}]/);
+});
+
+test('dashboard-summary shopBreakdown excludes a future-dated payment, staying consistent with the day-by-day series', async () => {
+  // series is naturally protected from anything past today (it's driven
+  // FROM a generate_series truncated to current_date, so a future row has
+  // no day to join into) - shopBreakdown has no such structural protection,
+  // since it's driven FROM shops and joined on shop_id, not on any day
+  // boundary. Without an explicit upper bound, a future-dated row would
+  // inflate shopBreakdown's revenue while series (and its own totals)
+  // stayed unaffected - two views of the same money silently disagreeing.
+  const userId = await insertUser();
+  const header = authHeaderFor(userId);
+  const createRes = await request(app).post('/api/companies').set('Authorization', header).send(VALID_COMPANY);
+  const shopId = await insertShop(createRes.body.id);
+
+  const orderToday = await insertOrder(shopId, daysAgo(0));
+  await insertPayment(orderToday, 15, daysAgo(0));
+  const orderFuture = await insertOrder(shopId, daysAgo(-5));
+  await insertPayment(orderFuture, 1000, daysAgo(-5));
+
+  const res = await request(app)
+    .get('/api/companies/mine/dashboard-summary?days=7')
+    .set('Authorization', header);
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.shopBreakdown.length, 1);
+  assert.equal(res.body.shopBreakdown[0].shopId, shopId);
+  assert.equal(res.body.shopBreakdown[0].revenue, 15, 'the future-dated £1000 payment must not be counted');
+  assert.equal(res.body.totals.revenue, 15, 'series-derived totals must agree with shopBreakdown');
+});

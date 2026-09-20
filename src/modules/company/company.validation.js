@@ -30,3 +30,12 @@ export const cardPaymentModeSchema = z.object({
 });
 
 export const billingHistoryQuerySchema = limitQuerySchema;
+
+// Dashboard home (15.1) — how many trailing days (including today) the
+// revenue/expense series covers. Capped at 90 (not 365+): every day is one
+// row generated via `generate_series`, and today's real callers (a
+// last-14/30-day chart) never need more than that - a larger window is a
+// future decision, not a limit to pre-guess now.
+export const dashboardSummaryQuerySchema = z.object({
+  days: z.coerce.number().int().min(1).max(90).default(14),
+});

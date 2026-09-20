@@ -168,3 +168,142 @@ export async function setGracePeriodEndsAt(companyId, gracePeriodEndsAt) {
     companyId,
   ]);
 }
+
+/**
+ * Dashboard home (Module 15.1) — a daily revenue/expense series across every
+ * active shop this company owns, for the last `days` calendar days
+ * (inclusive of today), plus a per-shop revenue breakdown over that same
+ * window. Read-only aggregate, deliberately NOT behind requireActiveBilling
+ * (§3.6's own "reading stays available, only writes are blocked"
+ * philosophy) — a locked-out owner can still see how the business has been
+ * doing.
+ *
+ * **Revenue is defined as money that actually moved** (`SUM(order_payments.amount)
+ * MINUS SUM(order_refunds.amount)`, keyed by each row's own `created_at`),
+ * not anything derived from `orders.status` or summed from order totals —
+ * the same "payments/refunds are the source of truth for money taken"
+ * precedent `order.service.js`'s own `recordPayment`/`refundPayment` already
+ * establish. **Expense is purchase-order cost** (`quantity * unit_cost`,
+ * the exact `COALESCE(SUM(...), 0)` expression `purchaseOrder.repository.js`
+ * already uses for `PurchaseOrderSummary.totalCost` — one definition,
+ * reused here rather than re-derived), keyed by `ordered_at`. There is no
+ * other "expense" concept modeled anywhere in this system today (no payroll,
+ * no rent, no manual entries) — this is a deliberately honest label for what
+ * is actually trackable, not a full P&L.
+ *
+ * **Revenue and refunds are aggregated in separate CTEs before being joined
+ * to the day/shop grain, never combined via a single multi-table LEFT JOIN**
+ * — an order can have several payments and several refunds, and refunds
+ * join to `order_payments` (not `orders`) on `payment_id`; joining both
+ * one-to-many relationships in the same row set fans out and silently
+ * double-counts `payments.amount` once per matching refund row. Pre-aggregating
+ * each side down to one row per day (or per shop) before the final join
+ * avoids that entirely.
+ *
+ * **`shopBreakdown`'s CTEs carry an explicit upper bound (`<= end_day`) on
+ * BOTH `payments_by_shop` and `refunds_by_shop`, matching the `series`
+ * query's own window exactly** — caught by CodeRabbit, since the original
+ * only had `>= start_day`. `series` is naturally protected from anything
+ * past today: it's driven FROM `days` (`generate_series` truncated to
+ * `current_date`), and a LEFT JOIN keyed on `day` simply has no row for a
+ * date past that to match. `shopBreakdown` has no such structural
+ * protection - it's driven FROM `shops` and joined on `shop_id`, not on any
+ * day boundary at all, so without this explicit upper bound any
+ * payment/refund dated after the window (a clock-skewed insert, backfilled
+ * test data, a future-dated row of any origin) would silently inflate a
+ * shop's revenue while never showing up in the day-by-day `series` its own
+ * total is supposed to reconcile against - two views of the same money that
+ * could quietly disagree.
+ */
+export async function getDashboardSummary(companyId, days) {
+  const { rows: series } = await query(
+    `WITH shop_ids AS (
+       SELECT id FROM shops WHERE company_id = $1 AND deleted_at IS NULL
+     ),
+     bounds AS (
+       SELECT (current_date - ($2::int - 1)) AS start_day, current_date AS end_day
+     ),
+     days AS (
+       SELECT generate_series(start_day, end_day, interval '1 day')::date AS day
+       FROM bounds
+     ),
+     payments AS (
+       SELECT op.created_at::date AS day, SUM(op.amount) AS amount
+       FROM order_payments op
+       JOIN orders o ON o.id = op.order_id
+       WHERE o.shop_id IN (SELECT id FROM shop_ids)
+         AND op.created_at::date >= (SELECT start_day FROM bounds)
+       GROUP BY 1
+     ),
+     refunds AS (
+       SELECT orf.created_at::date AS day, SUM(orf.amount) AS amount
+       FROM order_refunds orf
+       JOIN order_payments op ON op.id = orf.payment_id
+       JOIN orders o ON o.id = op.order_id
+       WHERE o.shop_id IN (SELECT id FROM shop_ids)
+         AND orf.created_at::date >= (SELECT start_day FROM bounds)
+       GROUP BY 1
+     ),
+     expenses AS (
+       SELECT po.ordered_at::date AS day, COALESCE(SUM(poi.quantity * poi.unit_cost), 0) AS amount
+       FROM purchase_orders po
+       JOIN purchase_order_items poi ON poi.purchase_order_id = po.id
+       WHERE po.shop_id IN (SELECT id FROM shop_ids)
+         AND po.deleted_at IS NULL
+         AND po.ordered_at::date >= (SELECT start_day FROM bounds)
+       GROUP BY 1
+     ),
+     order_counts AS (
+       SELECT o.created_at::date AS day, count(*) AS count
+       FROM orders o
+       WHERE o.shop_id IN (SELECT id FROM shop_ids)
+         AND o.created_at::date >= (SELECT start_day FROM bounds)
+       GROUP BY 1
+     )
+     SELECT
+       to_char(days.day, 'YYYY-MM-DD') AS day,
+       COALESCE(payments.amount, 0) - COALESCE(refunds.amount, 0) AS revenue,
+       COALESCE(expenses.amount, 0) AS expense,
+       COALESCE(order_counts.count, 0)::int AS order_count
+     FROM days
+     LEFT JOIN payments ON payments.day = days.day
+     LEFT JOIN refunds ON refunds.day = days.day
+     LEFT JOIN expenses ON expenses.day = days.day
+     LEFT JOIN order_counts ON order_counts.day = days.day
+     ORDER BY days.day`,
+    [companyId, days]
+  );
+
+  const { rows: shopBreakdown } = await query(
+    `WITH bounds AS (
+       SELECT (current_date - ($2::int - 1)) AS start_day, current_date AS end_day
+     ),
+     payments_by_shop AS (
+       SELECT o.shop_id, SUM(op.amount) AS gross
+       FROM orders o
+       JOIN order_payments op ON op.order_id = o.id
+       WHERE op.created_at::date >= (SELECT start_day FROM bounds)
+         AND op.created_at::date <= (SELECT end_day FROM bounds)
+       GROUP BY o.shop_id
+     ),
+     refunds_by_shop AS (
+       SELECT o.shop_id, SUM(orf.amount) AS refunded
+       FROM orders o
+       JOIN order_payments op ON op.order_id = o.id
+       JOIN order_refunds orf ON orf.payment_id = op.id
+       WHERE orf.created_at::date >= (SELECT start_day FROM bounds)
+         AND orf.created_at::date <= (SELECT end_day FROM bounds)
+       GROUP BY o.shop_id
+     )
+     SELECT s.id AS shop_id, s.name AS shop_name,
+            COALESCE(p.gross, 0) - COALESCE(r.refunded, 0) AS revenue
+     FROM shops s
+     LEFT JOIN payments_by_shop p ON p.shop_id = s.id
+     LEFT JOIN refunds_by_shop r ON r.shop_id = s.id
+     WHERE s.company_id = $1 AND s.deleted_at IS NULL
+     ORDER BY s.created_at`,
+    [companyId, days]
+  );
+
+  return { series, shopBreakdown };
+}

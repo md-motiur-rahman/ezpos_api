@@ -207,3 +207,131 @@ test('login is rate-limited after repeated attempts', async () => {
   assert.equal(lastStatus, 429);
 });
 
+// --- POST /api/staff-auth/change-pin ---
+
+test('change-pin rejects requests with no session token', async () => {
+  const res = await request(app)
+    .post('/api/staff-auth/change-pin')
+    .send({ currentPin: KNOWN_PIN, newPin: '87654321' });
+
+  assert.equal(res.status, 401);
+});
+
+test('change-pin succeeds with the correct current PIN, and the new PIN then logs in', async () => {
+  const { staffIdCode } = await setupStaff();
+  const loginRes = await request(app)
+    .post('/api/staff-auth/login')
+    .send({ staffIdCode, pin: KNOWN_PIN });
+  const newPin = '87654321';
+
+  const res = await request(app)
+    .post('/api/staff-auth/change-pin')
+    .set('Authorization', `Bearer ${loginRes.body.sessionToken}`)
+    .send({ currentPin: KNOWN_PIN, newPin });
+
+  assert.equal(res.status, 200);
+
+  const reLoginRes = await request(app)
+    .post('/api/staff-auth/login')
+    .send({ staffIdCode, pin: newPin });
+  assert.equal(reLoginRes.status, 200);
+
+  // The OLD PIN must no longer work.
+  const oldPinRes = await request(app)
+    .post('/api/staff-auth/login')
+    .send({ staffIdCode, pin: KNOWN_PIN });
+  assert.equal(oldPinRes.status, 401);
+});
+
+test('change-pin revokes every session for this staff member, including the one making the request', async () => {
+  const { shopId, staffIdCode } = await setupStaff();
+  const firstSession = await request(app)
+    .post('/api/staff-auth/login')
+    .send({ staffIdCode, pin: KNOWN_PIN });
+  const secondSession = await request(app)
+    .post('/api/staff-auth/login')
+    .send({ staffIdCode, pin: KNOWN_PIN });
+  assert.equal(await activeSessionCount(shopId), 2);
+
+  await request(app)
+    .post('/api/staff-auth/change-pin')
+    .set('Authorization', `Bearer ${firstSession.body.sessionToken}`)
+    .send({ currentPin: KNOWN_PIN, newPin: '87654321' });
+
+  assert.equal(await activeSessionCount(shopId), 0);
+
+  // The second, unrelated session (a different device signed in as the same
+  // staff member) is also revoked - not just the one that changed the PIN.
+  const reuseRes = await request(app)
+    .post('/api/staff-auth/logout')
+    .send({ sessionToken: secondSession.body.sessionToken });
+  assert.equal(reuseRes.status, 200); // logout of an already-revoked token is a no-op, not an error
+});
+
+test('change-pin rejects an incorrect current PIN and does not touch the real one', async () => {
+  const { staffIdCode } = await setupStaff();
+  const loginRes = await request(app)
+    .post('/api/staff-auth/login')
+    .send({ staffIdCode, pin: KNOWN_PIN });
+
+  const res = await request(app)
+    .post('/api/staff-auth/change-pin')
+    .set('Authorization', `Bearer ${loginRes.body.sessionToken}`)
+    .send({ currentPin: '00000000', newPin: '87654321' });
+
+  assert.equal(res.status, 401);
+
+  // The original PIN still works - nothing was changed.
+  const stillWorksRes = await request(app)
+    .post('/api/staff-auth/login')
+    .send({ staffIdCode, pin: KNOWN_PIN });
+  assert.equal(stillWorksRes.status, 200);
+});
+
+test('change-pin rejects a new PIN identical to the current one', async () => {
+  const { staffIdCode } = await setupStaff();
+  const loginRes = await request(app)
+    .post('/api/staff-auth/login')
+    .send({ staffIdCode, pin: KNOWN_PIN });
+
+  const res = await request(app)
+    .post('/api/staff-auth/change-pin')
+    .set('Authorization', `Bearer ${loginRes.body.sessionToken}`)
+    .send({ currentPin: KNOWN_PIN, newPin: KNOWN_PIN });
+
+  assert.equal(res.status, 400);
+});
+
+test('change-pin rejects a new PIN that is not 8 digits', async () => {
+  const { staffIdCode } = await setupStaff();
+  const loginRes = await request(app)
+    .post('/api/staff-auth/login')
+    .send({ staffIdCode, pin: KNOWN_PIN });
+
+  const res = await request(app)
+    .post('/api/staff-auth/change-pin')
+    .set('Authorization', `Bearer ${loginRes.body.sessionToken}`)
+    .send({ currentPin: KNOWN_PIN, newPin: '123' });
+
+  assert.equal(res.status, 400);
+});
+
+test('change-pin is rate-limited after repeated wrong-current-PIN attempts', async () => {
+  const { staffIdCode } = await setupStaff();
+  const loginRes = await request(app)
+    .post('/api/staff-auth/login')
+    .send({ staffIdCode, pin: KNOWN_PIN });
+  const attempt = () =>
+    request(app)
+      .post('/api/staff-auth/change-pin')
+      .set('Authorization', `Bearer ${loginRes.body.sessionToken}`)
+      .send({ currentPin: '00000000', newPin: '87654321' });
+
+  let lastStatus;
+  for (let i = 0; i < 11; i += 1) {
+    lastStatus = (await attempt()).status;
+  }
+
+  assert.equal(lastStatus, 429);
+});
+

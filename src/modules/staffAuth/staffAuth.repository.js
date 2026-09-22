@@ -60,3 +60,43 @@ export async function revokeSession(tokenHash) {
     [tokenHash]
   );
 }
+
+/** Self-service PIN change's own lookup - just the hash to compare against,
+ * scoped by id (from an already-verified session via `requireStaffAuth`),
+ * unlike `findLoginContextsByStaffIdCode` which has to search broadly
+ * because login itself has no id yet. */
+export async function findPinHashById(staffId) {
+  const { rows } = await query(`SELECT pin_hash FROM staff WHERE id = $1 AND deleted_at IS NULL`, [
+    staffId,
+  ]);
+  return rows[0] ?? null;
+}
+
+/**
+ * `client` defaults to the shared pool but `staffAuth.service.js`'s
+ * `changePin` passes its transaction's own client instead, alongside the
+ * same call's `revokeAllSessionsForStaff` - the two must commit or roll
+ * back together (CodeRabbit finding: without this, a session-revocation
+ * failure could leave the PIN changed while every old session, including
+ * the one an attacker who obtained the old PIN might be holding, stays
+ * valid).
+ */
+export async function updatePinHash(staffId, pinHash, client = { query }) {
+  await client.query(`UPDATE staff SET pin_hash = $1, updated_at = now() WHERE id = $2`, [
+    pinHash,
+    staffId,
+  ]);
+}
+
+/** Every active session for one staff member, not just the one making the
+ * request - same "a credential change outlives no session, including the
+ * caller's own" policy `auth.repository.js`'s `revokeAllRefreshTokensForUser`
+ * already established for an owner's password change. `client` defaults to
+ * the shared pool; `changePin` passes its transaction's own client, same
+ * reasoning as `updatePinHash`'s own doc above. */
+export async function revokeAllSessionsForStaff(staffId, client = { query }) {
+  await client.query(
+    `UPDATE staff_sessions SET revoked_at = now() WHERE staff_id = $1 AND revoked_at IS NULL`,
+    [staffId]
+  );
+}

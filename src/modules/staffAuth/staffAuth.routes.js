@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import { requireStaffAuth } from '../../middleware/requireStaffAuth.js';
 import { validateBody } from '../../middleware/validate.js';
 import * as staffAuthController from './staffAuth.controller.js';
-import { staffLoginSchema, staffLogoutSchema } from './staffAuth.validation.js';
+import { staffLoginSchema, staffLogoutSchema, changePinSchema } from './staffAuth.validation.js';
 
 const router = Router();
 
@@ -37,5 +38,28 @@ const staffLoginLimiter = rateLimit({
 
 router.post('/login', staffLoginLimiter, validateBody(staffLoginSchema), staffAuthController.login);
 router.post('/logout', validateBody(staffLogoutSchema), staffAuthController.logout);
+
+/**
+ * Keyed by the authenticated staff id, not IP - unlike login, this route
+ * already knows exactly who's calling (`requireStaffAuth` runs first), so
+ * that's the more precise scope for "many attempts against one staff
+ * member's PIN" than an IP shared with unrelated tills/sessions would be.
+ */
+const changePinLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: { message: 'Too many attempts, please try again later.' } },
+  keyGenerator: (req) => req.staff?.id ?? ipKeyGenerator(req.ip),
+});
+
+router.post(
+  '/change-pin',
+  requireStaffAuth,
+  changePinLimiter,
+  validateBody(changePinSchema),
+  staffAuthController.changePin
+);
 
 export default router;

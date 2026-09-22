@@ -17,3 +17,13 @@ export const staffLoginSchema = z.object({
 export const staffLogoutSchema = z.object({
   sessionToken: z.string().min(1, 'sessionToken is required'),
 });
+
+// Self-service PIN change (a staff member changing their OWN pin, via an
+// already-authenticated session - see `requireStaffAuth` on this route).
+// Mirrors `auth.validation.js`'s own `changePasswordSchema` shape exactly:
+// current value required to prove it's really them, new value validated to
+// the same 8-digit format `staffLoginSchema` itself enforces.
+export const changePinSchema = z.object({
+  currentPin: z.string().regex(/^\d{8}$/, 'Current PIN must be 8 digits'),
+  newPin: z.string().regex(/^\d{8}$/, 'New PIN must be 8 digits'),
+});

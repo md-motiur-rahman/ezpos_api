@@ -421,8 +421,11 @@ test('creating a second shop reuses the subscription AND its shop line item', as
  * `config.env.isTest` fakes away the real Stripe call `endTrialNow` makes,
  * so the actual charge/invoice behavior is covered by reading
  * `stripe.js`'s own doc, not re-verified against a live Stripe call here.
+ *
+ * `confirmTrialEnd: true` is required to get past the 409 the next test
+ * covers - this test is about what happens once that's actually given.
  */
-test('adding a second shop mid-trial ends the trial today instead of at the original date', async () => {
+test('adding a second shop mid-trial, with confirmTrialEnd, ends the trial today instead of at the original date', async () => {
   const { userId, header } = await setupOwnerWithCompany('chain');
 
   await request(app).post('/api/shops').set('Authorization', header).send(VALID_SHOP);
@@ -436,7 +439,7 @@ test('adding a second shop mid-trial ends the trial today instead of at the orig
   const second = await request(app)
     .post('/api/shops')
     .set('Authorization', header)
-    .send({ ...VALID_SHOP, name: 'Second Shop' });
+    .send({ ...VALID_SHOP, name: 'Second Shop', confirmTrialEnd: true });
 
   assert.equal(second.status, 201);
 
@@ -444,6 +447,65 @@ test('adding a second shop mid-trial ends the trial today instead of at the orig
   const newTrialEnd = new Date(rows[0].trial_ends_at).getTime();
   assert.ok(newTrialEnd < originalTrialEnd.getTime());
   assert.ok(Math.abs(Date.now() - newTrialEnd) < 10_000); // ended "now", not just "earlier"
+});
+
+/**
+ * The actual server-side enforcement CodeRabbit flagged as missing: ending
+ * a trial early is real money moving today, so it must not be a silent side
+ * effect of an ordinary POST /api/shops - a request that doesn't explicitly
+ * carry `confirmTrialEnd` must be rejected outright, not defaulted to "no,
+ * don't confirm" and charged anyway. No shop should exist afterward either -
+ * this is checked before the shop row is even created, not rolled back
+ * after the fact.
+ */
+test('adding a second shop mid-trial without confirmTrialEnd is rejected, and creates nothing', async () => {
+  const { userId, header } = await setupOwnerWithCompany('chain');
+
+  await request(app).post('/api/shops').set('Authorization', header).send(VALID_SHOP);
+  await query(`UPDATE companies SET subscription_status = 'trialing' WHERE owner_user_id = $1`, [userId]);
+
+  const second = await request(app)
+    .post('/api/shops')
+    .set('Authorization', header)
+    .send({ ...VALID_SHOP, name: 'Second Shop' });
+
+  assert.equal(second.status, 409);
+  assert.match(second.body.error.message, /confirmTrialEnd/);
+
+  const listRes = await request(app).get('/api/shops').set('Authorization', header);
+  assert.equal(listRes.body.length, 1); // only the first shop - "Second Shop" was never created
+});
+
+/** Explicit `confirmTrialEnd: false` must be treated identically to
+ * omitting it entirely - it is not a "no" the caller gets to send and have
+ * honoured, it's an affirmative "yes" that was withheld either way. */
+test('adding a second shop mid-trial with confirmTrialEnd explicitly false is still rejected', async () => {
+  const { userId, header } = await setupOwnerWithCompany('chain');
+
+  await request(app).post('/api/shops').set('Authorization', header).send(VALID_SHOP);
+  await query(`UPDATE companies SET subscription_status = 'trialing' WHERE owner_user_id = $1`, [userId]);
+
+  const second = await request(app)
+    .post('/api/shops')
+    .set('Authorization', header)
+    .send({ ...VALID_SHOP, name: 'Second Shop', confirmTrialEnd: false });
+
+  assert.equal(second.status, 409);
+});
+
+/** `confirmTrialEnd` is meaningless outside the one case it exists for -
+ * sending it when the company isn't actually trialing must not do anything
+ * unexpected (no trial to end, nothing extra charged). */
+test('confirmTrialEnd is harmless when the company is not trialing', async () => {
+  const { header } = await setupOwnerWithCompany('chain');
+
+  await request(app).post('/api/shops').set('Authorization', header).send(VALID_SHOP);
+  const second = await request(app)
+    .post('/api/shops')
+    .set('Authorization', header)
+    .send({ ...VALID_SHOP, name: 'Second Shop', confirmTrialEnd: true });
+
+  assert.equal(second.status, 201);
 });
 
 /** Once the trial is already over, a later shop must not touch trial_ends_at

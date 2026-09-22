@@ -59,6 +59,35 @@ export async function createShop(ownerUserId, data) {
     }
   }
 
+  // A second-or-later shop never gets its own free trial - adding one while
+  // the company's (one-time-only) trial is still running ends that trial
+  // TODAY and charges every active shop immediately (see `endTrialNow`'s
+  // own doc further down) - real money moving sooner than the original
+  // trial date, not a routine consequence a client should be able to
+  // trigger without saying so. `confirmTrialEnd` is that explicit
+  // agreement, and this is where it's actually enforced - CodeRabbit
+  // correctly flagged that the frontend's own confirmation popup
+  // (`app/(dashboard)/shops/new/page.tsx`) was UI-only before this: nothing
+  // stopped a stale page that loaded before shop #1 existed, or a direct
+  // API call, from triggering the exact same charge with no confirmation
+  // ever shown. This check closes that gap at the one place it actually
+  // matters, and it's race-free by construction - `company.subscription_
+  // status` was read fresh from the DB a few lines up, in THIS request, so
+  // there is no separate earlier client-side refetch for another request to
+  // race against; the same read that decides "does this consequence apply
+  // right now" is what `confirmTrialEnd` is checked against.
+  //
+  // Deliberately checked BEFORE the shop row is created below, not after -
+  // unlike the Stripe calls further down, a missing confirmation isn't a
+  // billing failure needing a rollback, it's a request that should never
+  // have committed anything in the first place.
+  if (company.subscription_status === 'trialing' && !data.confirmTrialEnd) {
+    throw new AppError(
+      'Adding a shop now will end your free trial today and charge every active shop immediately. Resubmit with confirmTrialEnd to proceed.',
+      409
+    );
+  }
+
   const shop = await shopRepository.createShop(company.id, data);
 
   // Billing: first shop creates the company's subscription (Stripe can't
@@ -100,11 +129,10 @@ export async function createShop(ownerUserId, data) {
       // nothing charged until the original trial_end. Ending the trial
       // right now instead makes Stripe invoice - and attempt to charge -
       // the subscription's CURRENT item set immediately: every existing
-      // shop plus this new one, together, starting today. This is exactly
-      // the policy the frontend's own confirmation dialog states before
-      // this request is ever sent (`app/(dashboard)/shops/new/page.tsx`'s
-      // own doc) - there is no path to add a shop mid-trial that keeps
-      // deferring to the original date.
+      // shop plus this new one, together, starting today. Reachable here at
+      // all only because the `confirmTrialEnd` gate above already let this
+      // request through - there is no path to add a shop mid-trial that
+      // keeps deferring to the original date, confirmed or not.
       //
       // Ordering matters and is already correct here: the quantity/item
       // change above always runs BEFORE this, so the invoice Stripe

@@ -12,6 +12,14 @@ export const createShopSchema = z.object({
   rotaEnabled: z.boolean().optional(),
   vatRegistered: z.boolean(),
   defaultVatRate: z.number().min(0).max(100).optional(),
+  // The explicit "yes, end my trial and charge every shop today" agreement
+  // (shop.service.js's own `createShop` doc explains exactly when this is
+  // actually required and why a bare client-side notice isn't enough).
+  // Optional here because it's irrelevant for every OTHER caller of this
+  // schema - a first shop, a shop added outside a trial, or an update via
+  // `updateShopSchema` below - the service is what decides whether it was
+  // actually needed for this specific request, never this schema.
+  confirmTrialEnd: z.boolean().optional(),
 });
 
 export const updateShopSchema = createShopSchema.partial();

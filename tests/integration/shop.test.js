@@ -412,6 +412,64 @@ test('creating a second shop reuses the subscription AND its shop line item', as
   assert.equal(rows[0].stripe_subscription_item_id, rows[1].stripe_subscription_item_id);
 });
 
+/**
+ * A second-or-later shop never gets its own free trial. Adding one while
+ * the company's FIRST (and only ever) trial is still running must end that
+ * trial today rather than silently letting the new shop ride the remainder
+ * of it for free - `trial_ends_at` moving to "now" (not staying at the
+ * original future date) is the one DB-observable side effect of that;
+ * `config.env.isTest` fakes away the real Stripe call `endTrialNow` makes,
+ * so the actual charge/invoice behavior is covered by reading
+ * `stripe.js`'s own doc, not re-verified against a live Stripe call here.
+ */
+test('adding a second shop mid-trial ends the trial today instead of at the original date', async () => {
+  const { userId, header } = await setupOwnerWithCompany('chain');
+
+  await request(app).post('/api/shops').set('Authorization', header).send(VALID_SHOP);
+
+  const originalTrialEnd = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
+  await query(`UPDATE companies SET subscription_status = 'trialing', trial_ends_at = $1 WHERE owner_user_id = $2`, [
+    originalTrialEnd,
+    userId,
+  ]);
+
+  const second = await request(app)
+    .post('/api/shops')
+    .set('Authorization', header)
+    .send({ ...VALID_SHOP, name: 'Second Shop' });
+
+  assert.equal(second.status, 201);
+
+  const { rows } = await query(`SELECT trial_ends_at FROM companies WHERE owner_user_id = $1`, [userId]);
+  const newTrialEnd = new Date(rows[0].trial_ends_at).getTime();
+  assert.ok(newTrialEnd < originalTrialEnd.getTime());
+  assert.ok(Math.abs(Date.now() - newTrialEnd) < 10_000); // ended "now", not just "earlier"
+});
+
+/** Once the trial is already over, a later shop must not touch trial_ends_at
+ * at all - only an actually-`trialing` subscription is being cut short. */
+test('adding a shop after the trial already ended leaves trial_ends_at untouched', async () => {
+  const { userId, header } = await setupOwnerWithCompany('chain');
+
+  await request(app).post('/api/shops').set('Authorization', header).send(VALID_SHOP);
+
+  const pastTrialEnd = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  await query(`UPDATE companies SET subscription_status = 'active', trial_ends_at = $1 WHERE owner_user_id = $2`, [
+    pastTrialEnd,
+    userId,
+  ]);
+
+  const second = await request(app)
+    .post('/api/shops')
+    .set('Authorization', header)
+    .send({ ...VALID_SHOP, name: 'Second Shop' });
+
+  assert.equal(second.status, 201);
+
+  const { rows } = await query(`SELECT trial_ends_at FROM companies WHERE owner_user_id = $1`, [userId]);
+  assert.equal(new Date(rows[0].trial_ends_at).getTime(), pastTrialEnd.getTime());
+});
+
 /** The actual reported bug: the second shop appeared, then silently vanished. */
 test('a second shop for a chain business still exists after creation', async () => {
   const { header } = await setupOwnerWithCompany('chain');

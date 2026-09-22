@@ -121,8 +121,16 @@ export async function setStripeSubscriptionId(companyId, stripeSubscriptionId) {
 }
 
 /**
- * Written exactly once per company, when its first subscription is created.
- * Never cleared - a non-null value permanently marks the trial as used up.
+ * Written when a company's first subscription is created (a non-null value
+ * permanently marks the trial as used up, never cleared back to null), and
+ * again - to an EARLIER value - if that same trial is cut short by adding a
+ * second shop mid-trial (shop.service.js's own `createShop`, the "both
+ * shops billed together, starting today" policy). That second write keeps
+ * this column an honest answer to "when did/does the trial actually end"
+ * rather than a stale date that stopped being true the moment the trial was
+ * ended early - every screen that displays it (`/company`, `/shops/new`)
+ * reads this column directly and would otherwise show a future date for a
+ * trial that's already over.
  */
 export async function setTrialEndsAt(companyId, trialEndsAt) {
   await query(

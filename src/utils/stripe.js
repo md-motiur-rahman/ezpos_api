@@ -196,6 +196,46 @@ export async function setSubscriptionItemQuantity({ subscriptionItemId, quantity
 }
 
 /**
+ * Ends a subscription's trial right now instead of at its originally-granted
+ * trial_end - Stripe's own documented mechanism for "stop the free period
+ * early." The subscription transitions out of trialing immediately, and
+ * Stripe generates and attempts to collect the subscription's normal period
+ * invoice as of this moment, at whatever item quantities are on the
+ * subscription AT THE TIME THIS CALL RUNS.
+ *
+ * That last part is load-bearing for the one caller this has today
+ * (shop.service.js's createShop, "both shops billed together, starting
+ * today" when a second shop is added mid-trial): the invoice this produces
+ * only covers every shop if the quantity has ALREADY been raised to include
+ * the new one before this runs. Callers must call
+ * setSubscriptionItemQuantity (or addSubscriptionItem) first - this
+ * function has no way to enforce that ordering itself, since it only ever
+ * sees the subscription id, never the item being added.
+ *
+ * Whether the resulting charge actually succeeds is NOT something this call
+ * waits for or reports - Stripe invoices and attempts payment
+ * asynchronously, and the outcome arrives later via the existing
+ * `invoice.payment_succeeded` / `invoice.payment_failed` /
+ * `customer.subscription.updated` webhooks (billing.service.js), the exact
+ * same path a normal renewal failure already goes through. A declined card
+ * here does not fail the caller's own request or need special-casing - it
+ * surfaces as an ordinary past_due + grace-period cycle, same as any other
+ * failed invoice.
+ */
+export async function endTrialNow({ subscriptionId }) {
+  if (config.env.isTest) {
+    return;
+  }
+
+  try {
+    await stripe.subscriptions.update(subscriptionId, { trial_end: 'now' });
+  } catch (err) {
+    logger.error({ err, subscriptionId }, 'Failed to end trial early');
+    throw new AppError('Failed to update billing', 502);
+  }
+}
+
+/**
  * Removes one line item (a shop or an add-on). proration_behavior 'none'
  * means no credit is issued for the remainder of the current period -
  * matching the agreed policy: no mid-cycle refunds, access continues until

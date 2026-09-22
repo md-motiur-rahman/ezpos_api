@@ -6,6 +6,7 @@ import {
   removeSubscriptionItem,
   setSubscriptionItemQuantity,
   cancelSubscriptionAtPeriodEnd,
+  endTrialNow,
 } from '../../utils/stripe.js';
 import config from '../../config/index.js';
 import * as companyRepository from '../company/company.repository.js';
@@ -89,6 +90,48 @@ export async function createShop(ownerUserId, data) {
           metadata: { shopId: shop.id },
         });
         await shopRepository.setStripeSubscriptionItemId(shop.id, itemId);
+      }
+
+      // A second-or-later shop never gets its own free trial - the trial is
+      // granted once, on the company's very first subscription (the
+      // isFirstEverSubscription branch below). Simply leaving the quantity
+      // change above at proration_behavior: 'none' would let this shop ride
+      // the REMAINDER of shop #1's trial for free too, silently, with
+      // nothing charged until the original trial_end. Ending the trial
+      // right now instead makes Stripe invoice - and attempt to charge -
+      // the subscription's CURRENT item set immediately: every existing
+      // shop plus this new one, together, starting today. This is exactly
+      // the policy the frontend's own confirmation dialog states before
+      // this request is ever sent (`app/(dashboard)/shops/new/page.tsx`'s
+      // own doc) - there is no path to add a shop mid-trial that keeps
+      // deferring to the original date.
+      //
+      // Ordering matters and is already correct here: the quantity/item
+      // change above always runs BEFORE this, so the invoice Stripe
+      // generates when the trial ends reflects every shop, not just the
+      // ones that existed when the trial started (`endTrialNow`'s own doc).
+      if (company.subscription_status === 'trialing') {
+        await endTrialNow({ subscriptionId: company.stripe_subscription_id });
+
+        // Past this point Stripe has IRREVERSIBLY ended the trial and will
+        // invoice the subscription's current item set - there is no undoing
+        // it. So nothing from here on may roll this shop back: the outer
+        // catch's softDeleteShop is correct for a failure ABOVE this line
+        // (nothing billed yet), but applying it to a failure of the write
+        // below would delete a shop that Stripe has already committed to
+        // charging for, while the API reports it was never created - real
+        // money moving for a shop that "doesn't exist". This write is
+        // therefore best-effort: on failure trial_ends_at is left stale
+        // (still the original future date) until manually corrected, a
+        // narrow flagged limitation rather than that alternative.
+        try {
+          await companyRepository.setTrialEndsAt(company.id, new Date());
+        } catch (err) {
+          logger.error(
+            { err, companyId: company.id, shopId: shop.id },
+            'Trial ended in Stripe but trial_ends_at was not updated locally - needs manual reconciliation'
+          );
+        }
       }
     } else {
       // No subscription yet, so one is about to be created - and it must have

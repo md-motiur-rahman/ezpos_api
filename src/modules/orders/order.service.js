@@ -1055,6 +1055,33 @@ export async function setOrderItemStatus(actor, shopId, orderId, orderItemId, da
 }
 
 /**
+ * `GET /api/shops/:shopId/kds/orders` (Module 15.2) - the board's initial
+ * snapshot, the piece 10.1's push-only socket never provided on its own:
+ * `kdsSocket.js` only ever streams DELTA events going forward from the
+ * moment a screen connects, so a freshly opened (or reconnected) KDS
+ * screen needs a separate way to learn what was already cooking before it
+ * showed up. This is that way - gated on VIEW_KDS like every other KDS
+ * surface, not ACCESS_TILL, since the Chef (VIEW_KDS's primary holder, no
+ * ACCESS_TILL by default) is exactly who needs to load this board.
+ *
+ * Two-step deliberately, reusing existing pieces rather than a single new
+ * query that re-assembles order+items+modifiers itself: orderRepository.
+ * listActiveKdsOrderIdsForShop narrows a shop's full order history down to
+ * the handful still genuinely on the board (its own doc has the "why" of
+ * that filter), and fetchOrderDetail - completely unchanged, the exact
+ * function getOrder and createOrder's own response already go through -
+ * assembles each survivor. One definition of "what a full order looks
+ * like" stays the only one; this never risks drifting from it by
+ * re-deriving items/modifiers/payments a second way.
+ */
+export async function listKdsOrders(actor, shopId) {
+  await requireViewKds(actor, shopId);
+  const orderIds = await orderRepository.listActiveKdsOrderIdsForShop(shopId);
+  const details = await Promise.all(orderIds.map((id) => fetchOrderDetail(shopId, id)));
+  return details.map(toKdsOrderView);
+}
+
+/**
  * Whether this company's card payments route through OUR payment provider.
  *
  * 'own' means the shop takes card on its own bank-supplied terminal: the

@@ -57,6 +57,24 @@ export async function findActiveItemByIdForShop(id, shopId) {
   return rows[0] ?? null;
 }
 
+/**
+ * Adds to quantity_on_hand and returns the updated row from the SAME
+ * statement, so the response reflects exactly the write that happened - a
+ * soft-delete landing afterwards can't turn a completed addition into a 404.
+ * Returns null only if the item is not active in this shop at the moment of
+ * the UPDATE, in which case nothing was changed.
+ */
+export async function addToItemQuantity(id, shopId, amount) {
+  const { rows } = await query(
+    `UPDATE inventory_items
+     SET quantity_on_hand = quantity_on_hand + $3, updated_at = now()
+     WHERE id = $1 AND shop_id = $2 AND deleted_at IS NULL
+     RETURNING ${COLUMNS}`,
+    [id, shopId, amount]
+  );
+  return rows[0] ?? null;
+}
+
 /** Used by 8.2's scan endpoint - the barcode-scan equivalent of findActiveItemByIdForShop. */
 export async function findActiveItemBySkuForShop(sku, shopId) {
   const { rows } = await query(

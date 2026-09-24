@@ -153,6 +153,47 @@ export async function listOrdersForShop(shopId) {
   return rows;
 }
 
+/**
+ * Candidate order ids for a KDS board (Module 15.2) - deliberately NOT a
+ * full order fetch. "Still has kitchen work outstanding" is cheap to ask
+ * the database directly (one EXISTS per order, no per-item JS derivation
+ * needed just to decide "on the board or not"), so this narrows the
+ * survivors first and lets the caller (order.service.js's listKdsOrders)
+ * fetch full detail via the existing fetchOrderDetail only for orders that
+ * will actually appear on the board - not for a shop's entire order
+ * history, the overwhelming majority of which is long since served or
+ * cancelled by the time anyone's looking at the kitchen screen.
+ *
+ * "Still has kitchen work outstanding" mirrors deriveKitchenStatus's own
+ * rule (kdsOrderView.js) from the opposite direction, and the two must
+ * never drift: an order belongs on the board while it is not cancelled AND
+ * has at least one item that is neither voided nor already 'served' -
+ * exactly the same items deriveKitchenStatus itself would compute a
+ * non-null, non-'served' kitchenStatus from. This filters orders IN at the
+ * SQL level; that function derives the SAME per-order status a Chef reads
+ * off the ticket once it is on the board.
+ *
+ * Oldest first (ASC) - a kitchen works tickets in the order they came in,
+ * not the order they'll finish.
+ */
+export async function listActiveKdsOrderIdsForShop(shopId) {
+  const { rows } = await query(
+    `SELECT o.id
+     FROM orders o
+     WHERE o.shop_id = $1
+       AND o.status != 'cancelled'
+       AND EXISTS (
+         SELECT 1 FROM order_items oi
+         WHERE oi.order_id = o.id
+           AND oi.voided_at IS NULL
+           AND oi.status != 'served'
+       )
+     ORDER BY o.created_at ASC`,
+    [shopId]
+  );
+  return rows.map((row) => row.id);
+}
+
 export async function findOrderByIdForShop(id, shopId) {
   const { rows } = await query(
     `SELECT ${ORDER_COLUMNS} FROM orders WHERE id = $1 AND shop_id = $2`,

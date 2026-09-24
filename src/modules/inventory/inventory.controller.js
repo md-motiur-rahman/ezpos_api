@@ -16,6 +16,16 @@ export const getItem = asyncHandler(async (req, res) => {
   res.status(200).json(item);
 });
 
+export const addStock = asyncHandler(async (req, res) => {
+  const item = await inventoryService.addStock(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId,
+    req.body.amount
+  );
+  res.status(200).json(item);
+});
+
 export const updateItem = asyncHandler(async (req, res) => {
   const item = await inventoryService.updateItem(
     req.actor,

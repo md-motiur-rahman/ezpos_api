@@ -3,6 +3,7 @@ import { resolveActorFromToken, bearerTokenFrom } from '../staffAuth/actorFromTo
 import { resolveActorAuthority, assertHasPermission } from '../staff/actorAuthority.js';
 import { PERMISSIONS } from '../staff/permissions.js';
 import { toKdsOrderView } from './kdsOrderView.js';
+import { consumeKdsTicket } from './kdsTicket.service.js';
 import { logger } from '../../utils/logger.js';
 
 /**
@@ -197,6 +198,17 @@ export function broadcastOrderEvent(shopId, type, order) {
  * rejects any shopId that is not their own, and for an owner it already
  * requires the shop to belong to their company.
  *
+ * **Two ways to supply the token (Module 15.1's own blocker resolution,
+ * `kdsTicket.service.js`'s doc has the full reasoning)**: the
+ * `Authorization` header, tried first - what every non-browser client
+ * (a native till/KDS app, this project's own `ws`-based test suite) uses
+ * directly, unchanged from before this module existed; or, only when that
+ * header is absent, a `?ticket=` query string - what a BROWSER's
+ * `new WebSocket(url)` uses instead, since it cannot set headers at all.
+ * `consumeKdsTicket` does its own shopId check and is itself the ticket's
+ * entire authorization contract; what happens below is unchanged either
+ * way once `token` is in hand.
+ *
  * Returns { shopId, actor } on success, or throws an AppError whose
  * statusCode the caller turns into an HTTP rejection.
  */
@@ -204,15 +216,19 @@ async function authorizeUpgrade(request) {
   // request.url is path + query only (never absolute) for a server-side
   // request, but parse defensively against a base so a query string can
   // never leak into the path match.
-  const pathname = new URL(request.url, 'http://placeholder.invalid').pathname;
-  const match = KDS_PATH_PATTERN.exec(pathname);
+  const url = new URL(request.url, 'http://placeholder.invalid');
+  const match = KDS_PATH_PATTERN.exec(url.pathname);
 
   if (!match) {
     return { rejection: { statusCode: 404, message: 'Not found' } };
   }
   const shopId = match[1];
 
-  const token = bearerTokenFrom(request.headers.authorization);
+  let token = bearerTokenFrom(request.headers.authorization);
+  if (!token) {
+    const ticket = url.searchParams.get('ticket');
+    token = ticket ? consumeKdsTicket(ticket, shopId)?.token ?? null : null;
+  }
   const actor = await resolveActorFromToken(token);
 
   if (!actor) {

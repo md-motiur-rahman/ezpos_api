@@ -6,6 +6,7 @@ import * as inventoryController from './inventory.controller.js';
 import {
   createInventoryItemSchema,
   updateInventoryItemSchema,
+  addStockBodySchema,
   inventoryItemIdParamSchema,
   inventoryListQuerySchema,
   itemSupplierParamSchema,
@@ -58,6 +59,13 @@ router.patch(
   validateParams(inventoryItemIdParamSchema),
   validateBody(updateInventoryItemSchema),
   inventoryController.updateItem
+);
+router.post(
+  '/:itemId/add-stock',
+  requireActiveBillingForShop,
+  validateParams(inventoryItemIdParamSchema),
+  validateBody(addStockBodySchema),
+  inventoryController.addStock
 );
 router.delete(
   '/:itemId',

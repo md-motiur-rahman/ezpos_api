@@ -203,3 +203,102 @@ test('the Owner can manage inventory directly (bypasses the permission system en
 
   assert.equal(res.status, 201);
 });
+// --- Add stock ---
+
+test('add-stock adds to the current quantity and returns the updated item', async () => {
+  const { shopId } = await setupOwnerWithShop();
+  const managerHeader = await managerHeaderFor(shopId);
+  const item = await request(app)
+    .post(`/api/shops/${shopId}/inventory-items`)
+    .set('Authorization', managerHeader)
+    .send({ name: 'Flour', unit: 'kg', quantityOnHand: 10 });
+
+  const first = await request(app)
+    .post(`/api/shops/${shopId}/inventory-items/${item.body.id}/add-stock`)
+    .set('Authorization', managerHeader)
+    .send({ amount: 2.5 });
+  const second = await request(app)
+    .post(`/api/shops/${shopId}/inventory-items/${item.body.id}/add-stock`)
+    .set('Authorization', managerHeader)
+    .send({ amount: 0.25 });
+
+  assert.equal(first.status, 200);
+  assert.equal(first.body.quantityOnHand, 12.5);
+  assert.equal(second.status, 200);
+  assert.equal(second.body.quantityOnHand, 12.75);
+});
+
+test('add-stock rejects a zero or negative amount', async () => {
+  const { shopId } = await setupOwnerWithShop();
+  const managerHeader = await managerHeaderFor(shopId);
+  const item = await request(app)
+    .post(`/api/shops/${shopId}/inventory-items`)
+    .set('Authorization', managerHeader)
+    .send({ name: 'Flour', unit: 'kg', quantityOnHand: 10 });
+
+  for (const amount of [0, -1]) {
+    const res = await request(app)
+      .post(`/api/shops/${shopId}/inventory-items/${item.body.id}/add-stock`)
+      .set('Authorization', managerHeader)
+      .send({ amount });
+    assert.equal(res.status, 400);
+  }
+});
+
+test('add-stock on a soft-deleted item is 404 and leaves the quantity untouched', async () => {
+  const { shopId } = await setupOwnerWithShop();
+  const managerHeader = await managerHeaderFor(shopId);
+  const item = await request(app)
+    .post(`/api/shops/${shopId}/inventory-items`)
+    .set('Authorization', managerHeader)
+    .send({ name: 'Flour', unit: 'kg', quantityOnHand: 10 });
+  await request(app)
+    .delete(`/api/shops/${shopId}/inventory-items/${item.body.id}`)
+    .set('Authorization', managerHeader);
+
+  const res = await request(app)
+    .post(`/api/shops/${shopId}/inventory-items/${item.body.id}/add-stock`)
+    .set('Authorization', managerHeader)
+    .send({ amount: 5 });
+
+  assert.equal(res.status, 404);
+  const { rows } = await query(`SELECT quantity_on_hand FROM inventory_items WHERE id = $1`, [
+    item.body.id,
+  ]);
+  assert.equal(Number(rows[0].quantity_on_hand), 10);
+});
+
+test("add-stock on another shop's item is 404", async () => {
+  const ownerA = await setupOwnerWithShop();
+  const managerHeaderA = await managerHeaderFor(ownerA.shopId);
+  const item = await request(app)
+    .post(`/api/shops/${ownerA.shopId}/inventory-items`)
+    .set('Authorization', managerHeaderA)
+    .send({ name: 'Flour', unit: 'kg', quantityOnHand: 10 });
+  const ownerB = await setupOwnerWithShop();
+
+  const res = await request(app)
+    .post(`/api/shops/${ownerB.shopId}/inventory-items/${item.body.id}/add-stock`)
+    .set('Authorization', ownerB.header)
+    .send({ amount: 1 });
+
+  assert.equal(res.status, 404);
+});
+
+test('add-stock is refused for staff without MANAGE_INVENTORY', async () => {
+  const { shopId } = await setupOwnerWithShop();
+  const managerHeader = await managerHeaderFor(shopId);
+  const item = await request(app)
+    .post(`/api/shops/${shopId}/inventory-items`)
+    .set('Authorization', managerHeader)
+    .send({ name: 'Flour', unit: 'kg', quantityOnHand: 10 });
+  const server = await insertStaff(shopId, 'server');
+  const serverHeader = await staffHeaderFor(shopId, server.staffIdCode);
+
+  const res = await request(app)
+    .post(`/api/shops/${shopId}/inventory-items/${item.body.id}/add-stock`)
+    .set('Authorization', serverHeader)
+    .send({ amount: 1 });
+
+  assert.equal(res.status, 403);
+});

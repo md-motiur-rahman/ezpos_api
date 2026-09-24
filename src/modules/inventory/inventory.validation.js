@@ -40,6 +40,12 @@ export const updateInventoryItemSchema = z.object({
   sku: skuSchema.nullable().optional(),
 });
 
+// Strictly positive: this adds stock. Taking stock off goes through
+// wastage, and a miscount is corrected with PATCH quantityOnHand.
+export const addStockBodySchema = z.object({
+  amount: z.number().positive('amount must be greater than 0').max(99999999, 'amount is too large'),
+});
+
 export const inventoryItemIdParamSchema = z.object({
   shopId: z.string().uuid('Invalid shop id'),
   itemId: z.string().uuid('Invalid inventory item id'),

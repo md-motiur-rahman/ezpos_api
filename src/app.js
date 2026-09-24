@@ -28,6 +28,7 @@ import purchaseOrderRoutes from './modules/purchaseOrders/purchaseOrder.routes.j
 import wastageLogRoutes from './modules/wastage/wastageLog.routes.js';
 import inventoryScanRoutes from './modules/healthSafety/inventoryScan.routes.js';
 import orderRoutes from './modules/orders/order.routes.js';
+import kdsRoutes from './modules/kds/kds.routes.js';
 
 const app = express();
 
@@ -231,6 +232,7 @@ app.use('/api/shops/:shopId/purchase-orders', purchaseOrderRoutes);
 app.use('/api/shops/:shopId/wastage-logs', wastageLogRoutes);
 app.use('/api/shops/:shopId/inventory-scans', inventoryScanRoutes);
 app.use('/api/shops/:shopId/orders', orderRoutes);
+app.use('/api/shops/:shopId/kds', kdsRoutes);
 app.use('/api/shops', shopRoutes);
 app.use('/api/staff-auth', staffAuthRoutes);
 app.use('/api/staff-permissions', staffPermissionRoutes);

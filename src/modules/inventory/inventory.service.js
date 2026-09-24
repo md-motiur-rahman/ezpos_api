@@ -120,6 +120,20 @@ export async function updateItem(actor, shopId, itemId, data) {
   }
 }
 
+/**
+ * Adds to the current quantity in ONE statement, so a deduction made by the
+ * kitchen at the same moment can't be overwritten the way a read-then-PATCH
+ * of an absolute total could.
+ */
+export async function addStock(actor, shopId, itemId, amount) {
+  await requireManageInventory(actor, shopId);
+  const updated = await inventoryRepository.addToItemQuantity(itemId, shopId, amount);
+  if (!updated) {
+    throw new AppError('Inventory item not found', 404);
+  }
+  return toResponse(updated);
+}
+
 export async function deleteItem(actor, shopId, itemId) {
   await requireManageInventory(actor, shopId);
   const item = await getItemOrThrow(shopId, itemId);

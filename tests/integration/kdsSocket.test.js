@@ -150,6 +150,21 @@ function connect(port, shopId, authHeader) {
   );
 }
 
+/** The browser path (Module 15.1): no Authorization header at all, a
+ * `?ticket=` query string instead - exactly what `new WebSocket(url)` can
+ * actually send, unlike a custom header. */
+function connectWithTicket(port, shopId, ticket) {
+  return attachTo(
+    new WebSocket(`ws://127.0.0.1:${port}/api/shops/${shopId}/kds/socket?ticket=${ticket}`)
+  );
+}
+
+/** `POST /api/shops/:shopId/kds/ticket` - mints the ticket a browser client
+ * hands to connectWithTicket above. */
+function mintTicket(header, shopId) {
+  return request(app).post(`/api/shops/${shopId}/kds/ticket`).set('Authorization', header);
+}
+
 /** Resolves with the next parsed message, or rejects on timeout/socket error. */
 function nextMessage(ws, timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
@@ -313,6 +328,111 @@ test('a request to a path that is not the KDS socket is refused with 404', async
       })
     );
     assert.equal(await expectRejection(ws), 404);
+  } finally {
+    closeQuietly(ws);
+    await stopServer(ctx);
+  }
+});
+
+// --- Connection: browser ticket auth (Module 15.1) ---
+//
+// A browser's `new WebSocket(url)` cannot set an Authorization header at
+// all - kdsTicket.service.js's own doc has the full reasoning for why a
+// short-lived, single-use ticket minted over a normal REST call (which CAN
+// carry a header) is the fix, handed to the socket as `?ticket=` instead.
+
+test('a browser can mint a ticket, connect with no Authorization header, and receives the handshake', async () => {
+  const ctx = await startServer();
+  const { header, shopId } = await setupOwnerWithShop();
+  let ws;
+  try {
+    const mintRes = await mintTicket(header, shopId);
+    assert.equal(mintRes.status, 201);
+    assert.equal(typeof mintRes.body.ticket, 'string');
+    assert.ok(mintRes.body.ticket.length > 0);
+
+    ws = connectWithTicket(ctx.port, shopId, mintRes.body.ticket);
+    const hello = await nextMessage(ws);
+    assert.equal(hello.type, 'kds.connected');
+    assert.equal(hello.shopId, shopId);
+    assert.equal(hello.actor.type, 'owner');
+  } finally {
+    closeQuietly(ws);
+    await stopServer(ctx);
+  }
+});
+
+test('a ticket can only be used once', async () => {
+  const ctx = await startServer();
+  const { header, shopId } = await setupOwnerWithShop();
+  let firstWs;
+  let secondWs;
+  try {
+    const { body } = await mintTicket(header, shopId);
+
+    firstWs = connectWithTicket(ctx.port, shopId, body.ticket);
+    await nextMessage(firstWs);
+
+    secondWs = connectWithTicket(ctx.port, shopId, body.ticket);
+    assert.equal(await expectRejection(secondWs), 401);
+  } finally {
+    closeQuietly(firstWs);
+    closeQuietly(secondWs);
+    await stopServer(ctx);
+  }
+});
+
+test('a ticket minted for one shop cannot open a socket for a different shop', async () => {
+  const ctx = await startServer();
+  const { header, shopId } = await setupOwnerWithShop();
+  const otherShopId = await createShop(header, 'A Second Shop');
+  let ws;
+  try {
+    const { body } = await mintTicket(header, shopId);
+    ws = connectWithTicket(ctx.port, otherShopId, body.ticket);
+    assert.equal(await expectRejection(ws), 401);
+  } finally {
+    closeQuietly(ws);
+    await stopServer(ctx);
+  }
+});
+
+test('an unknown or already-expired ticket is refused with 401', async () => {
+  const ctx = await startServer();
+  const { shopId } = await setupOwnerWithShop();
+  let ws;
+  try {
+    ws = connectWithTicket(ctx.port, shopId, 'not-a-real-ticket');
+    assert.equal(await expectRejection(ws), 401);
+  } finally {
+    closeQuietly(ws);
+    await stopServer(ctx);
+  }
+});
+
+test('minting a ticket requires VIEW_KDS, same as the socket itself', async () => {
+  const { shopId } = await setupOwnerWithShop();
+  const server = await insertStaff(shopId, 'server'); // no VIEW_KDS by default
+  const serverHeader = await staffHeaderFor(shopId, server.staffIdCode);
+
+  const res = await mintTicket(serverHeader, shopId);
+  assert.equal(res.status, 403);
+});
+
+test('an Authorization header is tried before a ticket is ever looked at', async () => {
+  const ctx = await startServer();
+  const { header, shopId } = await setupOwnerWithShop();
+  let ws;
+  try {
+    // A garbage ticket alongside a genuinely valid header - if the header
+    // path were skipped in favor of the ticket, this would be refused.
+    ws = attachTo(
+      new WebSocket(`ws://127.0.0.1:${ctx.port}/api/shops/${shopId}/kds/socket?ticket=garbage`, {
+        headers: { Authorization: header },
+      })
+    );
+    const hello = await nextMessage(ws);
+    assert.equal(hello.type, 'kds.connected');
   } finally {
     closeQuietly(ws);
     await stopServer(ctx);

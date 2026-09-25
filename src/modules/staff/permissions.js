@@ -81,6 +81,8 @@ export const ROLE_DEFAULT_PERMISSIONS = Object.freeze({
     PERMISSIONS.MANAGE_ROTA,
     PERMISSIONS.MANAGE_MENU,
     PERMISSIONS.APPLY_DISCOUNT,
+    // A Manager sees their own shop's income, expense and best sellers.
+    PERMISSIONS.VIEW_REPORTS,
     // 10.1 - a Manager runs the floor and needs to see the kitchen queue.
     PERMISSIONS.VIEW_KDS,
   ]),

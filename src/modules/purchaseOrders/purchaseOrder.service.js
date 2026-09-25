@@ -39,7 +39,7 @@ function toListResponse(po) {
     orderedAt: po.ordered_at,
     notes: po.notes,
     itemCount: po.item_count,
-    totalCost: Number(po.total_cost),
+    totalCost: Number(Number(po.total_cost).toFixed(5)),
     createdAt: po.created_at,
     updatedAt: po.updated_at,
   };

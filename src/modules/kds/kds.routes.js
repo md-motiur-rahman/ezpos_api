@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { requireStaffOrOwnerAuth } from '../../middleware/requireStaffOrOwnerAuth.js';
-import { validateParams } from '../../middleware/validate.js';
+import { validateParams, validateQuery } from '../../middleware/validate.js';
 import * as kdsController from './kds.controller.js';
+import { kdsHistoryQuerySchema } from './kds.validation.js';
 import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
 
 /**
@@ -32,5 +33,11 @@ router.use(requireStaffOrOwnerAuth);
 
 router.post('/ticket', validateParams(shopIdOnlyParamSchema), kdsController.createTicket);
 router.get('/orders', validateParams(shopIdOnlyParamSchema), kdsController.listOrders);
+router.get(
+  '/history',
+  validateParams(shopIdOnlyParamSchema),
+  validateQuery(kdsHistoryQuerySchema),
+  kdsController.listHistory
+);
 
 export default router;

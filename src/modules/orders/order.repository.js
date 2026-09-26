@@ -194,6 +194,25 @@ export async function listActiveKdsOrderIdsForShop(shopId) {
   return rows.map((row) => row.id);
 }
 
+/**
+ * Every order the shop took in a window, newest first, whatever became of it -
+ * finished, still cooking, or cancelled. The kitchen log's source; the live
+ * board (listActiveKdsOrderIdsForShop above) deliberately shows only what is
+ * still being made. `limit + 1` rows are asked for by the caller to learn
+ * whether the window was cut short.
+ */
+export async function listKdsHistoryOrderIdsForShop(shopId, from, to, limit) {
+  const { rows } = await query(
+    `SELECT o.id
+     FROM orders o
+     WHERE o.shop_id = $1 AND o.created_at >= $2 AND o.created_at < $3
+     ORDER BY o.created_at DESC
+     LIMIT $4`,
+    [shopId, from, to, limit]
+  );
+  return rows.map((row) => row.id);
+}
+
 export async function findOrderByIdForShop(id, shopId) {
   const { rows } = await query(
     `SELECT ${ORDER_COLUMNS} FROM orders WHERE id = $1 AND shop_id = $2`,

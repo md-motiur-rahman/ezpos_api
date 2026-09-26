@@ -28,6 +28,11 @@ export const createTicket = asyncHandler(async (req, res) => {
  * to `/kds/ticket` and, conceptually, `/kds/socket`), not the till's
  * ACCESS_TILL-gated `/orders` surface a Chef is correctly 403'd from.
  */
+export const listHistory = asyncHandler(async (req, res) => {
+  const history = await orderService.listKdsHistory(req.actor, req.params.shopId, req.query);
+  res.status(200).json(history);
+});
+
 export const listOrders = asyncHandler(async (req, res) => {
   const orders = await orderService.listKdsOrders(req.actor, req.params.shopId);
   res.status(200).json(orders);

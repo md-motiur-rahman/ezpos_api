@@ -1081,6 +1081,38 @@ export async function listKdsOrders(actor, shopId) {
   return details.map(toKdsOrderView);
 }
 
+const KDS_HISTORY_LIMIT = 100;
+
+/**
+ * The kitchen log (view only): every order in a time window, including ones
+ * already finished or cancelled, through the same money-narrowed view the
+ * live board uses. Same VIEW_KDS gate as the board - a Chef can read it, and
+ * nothing here can change an order. `truncated` says the window held more
+ * than KDS_HISTORY_LIMIT orders and only the newest are returned.
+ *
+ * Detail is assembled a few orders at a time rather than all at once: each
+ * order is several queries, and a busy day fanned out in one go would take
+ * most of the connection pool.
+ */
+export async function listKdsHistory(actor, shopId, { from, to }) {
+  await requireViewKds(actor, shopId);
+  const ids = await orderRepository.listKdsHistoryOrderIdsForShop(
+    shopId,
+    from,
+    to,
+    KDS_HISTORY_LIMIT + 1
+  );
+  const truncated = ids.length > KDS_HISTORY_LIMIT;
+  const wanted = ids.slice(0, KDS_HISTORY_LIMIT);
+
+  const orders = [];
+  for (let i = 0; i < wanted.length; i += 10) {
+    const chunk = await Promise.all(wanted.slice(i, i + 10).map((id) => fetchOrderDetail(shopId, id)));
+    orders.push(...chunk.map(toKdsOrderView));
+  }
+  return { orders, truncated };
+}
+
 /**
  * Whether this company's card payments route through OUR payment provider.
  *

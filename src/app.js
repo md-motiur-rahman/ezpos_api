@@ -41,7 +41,7 @@ const app = express();
  * would key every tenant in the system to a single bucket, turning a
  * 300-per-15-min PER-CLIENT limit into a 300-per-15-min limit for the ENTIRE
  * platform, and the staff-login limiter's deliberate (IP, shopId) keying
- * (CLAUDE.md section 5) would collapse to per-shop-globally - so several
+ * would collapse to per-shop-globally - so several
  * tills in one busy shop could lock each other out.
  *
  * The value is 1, NOT `true`, and that distinction is the security-critical
@@ -139,9 +139,8 @@ const corsOptions = {
  * field off it and dies with a TypeError naming neither rate limiting nor the
  * real cause.
  *
- * The project already documents this hazard for the STAFF-LOGIN limiter
- * (CLAUDE.md section 5: keep per-file login counts reasonable, split files if
- * needed). This is the same trap one level up, previously unnoted.
+ * The same hazard already exists for the STAFF-LOGIN limiter (keep
+ * per-file login counts low, split test files if needed). This is the same trap one level up, previously unnoted.
  *
  * The middleware stays MOUNTED and active in test - headers are still emitted
  * and the code path still exercised - the ceiling is simply out of reach for

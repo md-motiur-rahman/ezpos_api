@@ -15,9 +15,8 @@ export const pool = new Pool({
 
   // `pg` defaults connectionTimeoutMillis to 0, which means "wait FOREVER for
   // a free connection". That is why an exhausted pool has shown up in this
-  // project as a test file that hangs indefinitely rather than as an error -
-  // see the 10.1 and 10.2 notes in CLAUDE.md, where a run appeared to stall
-  // for 20+ minutes and was recorded as environment noise. A request that
+  // project as a test file that hangs indefinitely rather than as an error (a run
+  // once appeared to stall for 20+ minutes and got written off as noise). A request that
   // cannot get a connection within 10s is a real problem (saturation or a
   // leak), and it should say so loudly instead of hanging until something
   // else times out. Healthy queries here acquire in single-digit

@@ -20,7 +20,7 @@ import { PERMISSIONS } from '../staff/permissions.js';
  * just part of the URL).
  *
  * **Deliberately not "just put the real bearer token in the query string
- * directly" (the other option `FRONTEND_CLAUDE.md` §6 named)** - a
+ * directly" (the other option the frontend notes considered)** - a
  * WebSocket URL's query string is exactly the kind of thing a hosting
  * platform's access log, an intermediate proxy, or a browser's own history
  * can retain, and `kdsSocket.js`'s own `ws.kdsToken` comment already relies

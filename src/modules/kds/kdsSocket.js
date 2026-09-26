@@ -14,7 +14,7 @@ import { logger } from '../../utils/logger.js';
  * http.Server routes a request carrying `Upgrade: websocket` exclusively to
  * its 'upgrade' listeners and never to the 'request' listener Express is
  * mounted on, so app.js's route table, its middleware chain, and its
- * mount-ordering hazard (CLAUDE.md section 2) are all simply not in play
+ * mount-ordering hazard are all simply not in play
  * here. app.js is therefore untouched by 10.1.
  *
  * KNOWN LIMITATION, flagged rather than hidden: the connection registry

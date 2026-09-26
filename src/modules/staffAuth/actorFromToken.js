@@ -19,8 +19,7 @@ import { isSessionExpired } from './staffSession.access.js';
  * copies of "how do we authenticate somebody" is exactly the kind of pair
  * that silently drifts when only one is updated. Lives in staffAuth/ because
  * the DB resource it actually operates on is that module's staff_sessions
- * table (CLAUDE.md section 2: helpers live with the resource they operate
- * on), even though it also handles the owner JWT, which touches no table.
+ * table (helpers live with the resource they operate on), even though it also handles the owner JWT, which touches no table.
  *
  * Returns the actor, or NULL when the token is absent/invalid/expired.
  * Deliberately returns null rather than throwing for an auth FAILURE, so
@@ -54,7 +53,7 @@ export async function resolveActorFromToken(token) {
     return null;
   }
 
-  // The sliding 60-minute window (CLAUDE.md section 2) - touching the
+  // The sliding 60-minute window - touching the
   // session keeps it alive. Preserved here exactly as the middleware did
   // it, so an authenticated request/handshake still refreshes the session.
   await staffAuthRepository.updateLastActive(session.id);

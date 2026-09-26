@@ -26,7 +26,7 @@ export const up = (pgm) => {
     // created_at (when we processed it).
     //
     // timestamptz, not date - this is a real instant, so the 8.2 `date`
-    // local-midnight trap (CLAUDE.md section 2) does not apply here and
+    // local-midnight trap does not apply here and
     // .toISOString() is the CORRECT way to render it back out.
     occurred_at: { type: 'timestamptz' },
     // SHA-256 of the canonicalized sync payload. This is what makes a

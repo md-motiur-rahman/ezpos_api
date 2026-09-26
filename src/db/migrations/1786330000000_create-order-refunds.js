@@ -44,7 +44,7 @@ export const up = (pgm) => {
 
   // Deliberately NO `method` column - it's always the parent payment's
   // method, so storing it here would be a redundant copy that could drift.
-  // "Derive, don't store" (CLAUDE.md section 2).
+  // Same "derive, don't store" rule as the rest of the schema.
 
   pgm.createIndex('order_refunds', 'payment_id');
 };

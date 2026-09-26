@@ -33,7 +33,7 @@ export const up = (pgm) => {
   // which Postgres serializes on this key, so two tills ringing up at the
   // same instant provably receive different numbers. A SELECT MAX()+1 would
   // hand them both the same one - this project has no transaction wrapper
-  // anywhere (CLAUDE.md section 2) to make read-then-write safe, so the
+  // anywhere to make read-then-write safe, so the
   // atomicity has to live in one statement. Verified empirically under real
   // concurrency before any code was written against it, same discipline as
   // 10.3's deduction claim and 9.7's ON CONFLICT finding.

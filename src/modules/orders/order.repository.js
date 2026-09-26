@@ -25,7 +25,7 @@ const ORDER_ITEM_VOID_COLUMNS = `voided_at, voided_by_actor_type, voided_by_acto
  * own incremented value. The obvious alternative - SELECT max(order_number)+1
  * then INSERT - would hand two tills ringing up simultaneously the SAME
  * number, because this project has no transaction wrapper anywhere
- * (CLAUDE.md section 2) to make that read-then-write atomic.
+ * to make that read-then-write atomic.
  *
  * Verified empirically before any code was written against it, the same
  * discipline as 10.3's deduction claim and 9.7's ON CONFLICT finding: 50

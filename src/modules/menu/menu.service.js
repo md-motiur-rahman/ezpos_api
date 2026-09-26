@@ -25,6 +25,7 @@ function toItemResponse(item) {
     price: Number(item.price),
     displayOrder: item.display_order,
     isActive: item.is_active,
+    allergens: item.allergens,
     createdAt: item.created_at,
     updatedAt: item.updated_at,
   };
@@ -82,11 +83,20 @@ export async function deleteCategory(ownerUserId, categoryId) {
 
 // --- Items ---
 
-export async function createItem(ownerUserId, { categoryId, name, description, price, displayOrder }) {
+export async function createItem(
+  ownerUserId,
+  { categoryId, name, description, price, displayOrder, allergens }
+) {
   const company = await getActiveCompanyOrThrow(ownerUserId);
   await getCategoryOrThrow(company.id, categoryId); // confirms the category is real and this owner's
 
-  const item = await menuRepository.createItem(categoryId, { name, description, price, displayOrder });
+  const item = await menuRepository.createItem(categoryId, {
+    name,
+    description,
+    price,
+    displayOrder,
+    allergens,
+  });
   return toItemResponse(item);
 }
 

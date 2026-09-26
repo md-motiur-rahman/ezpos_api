@@ -1,6 +1,9 @@
 import { z } from 'zod';
 import { ALLERGENS } from './allergens.js';
 
+// Allergens set on the dish itself. Same list the ingredients use.
+const itemAllergensSchema = z.array(z.enum(ALLERGENS));
+
 export const createCategorySchema = z.object({
   name: z.string().trim().min(1, 'Category name is required'),
   displayOrder: z.number().int().optional(),
@@ -22,6 +25,7 @@ export const createItemSchema = z.object({
   description: z.string().trim().optional(),
   price: z.number().positive('Price must be greater than 0'),
   displayOrder: z.number().int().optional(),
+  allergens: itemAllergensSchema.optional(),
 });
 
 export const updateItemSchema = z.object({
@@ -30,6 +34,7 @@ export const updateItemSchema = z.object({
   description: z.string().trim().optional(),
   price: z.number().positive('Price must be greater than 0').optional(),
   displayOrder: z.number().int().optional(),
+  allergens: itemAllergensSchema.optional(),
   isActive: z.boolean().optional(),
 });
 

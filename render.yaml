@@ -42,7 +42,7 @@ services:
     # service. While on free, migrations must be run by hand against the
     # database's EXTERNAL connection string (its ipAllowList blocks external
     # connections by default, so add your IP, run, then remove it):
-    #   DATABASE_URL="<external-url>?sslmode=require" \
+    #   DATABASE_URL="<external-url>?sslmode=verify-full" \
     #     npx node-pg-migrate up --migrations-dir src/db/migrations
     # Uncomment this the moment the plan moves to starter or above.
     # preDeployCommand: npm run migrate:up

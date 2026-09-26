@@ -8,6 +8,14 @@ import * as shopMenuRepository from './shopMenu.repository.js';
 
 const MANAGE_MENU_MESSAGE = "You do not have permission to manage this shop's menu";
 
+/**
+ * What a shop's menu shows for an item: the allergens set on the dish itself
+ * plus any carried in by ingredients in its recipe, each listed once.
+ */
+function mergeAllergens(own, fromIngredients) {
+  return [...new Set([...(own ?? []), ...(fromIngredients ?? [])])].sort();
+}
+
 function toResolvedItem(row, variants, modifierGroups, allergens) {
   return {
     id: row.id,
@@ -51,6 +59,7 @@ function toLocalItemResponse(row) {
     description: row.description,
     price: Number(row.price),
     displayOrder: row.display_order,
+    allergens: row.allergens,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -199,14 +208,14 @@ export async function getResolvedMenu(actor, shopId) {
       row,
       variantsByItemId.get(row.id) ?? [],
       masterModifiersByItemId.get(row.id) ?? [],
-      masterAllergensByItemId.get(row.id) ?? []
+      mergeAllergens(row.own_allergens, masterAllergensByItemId.get(row.id))
     )
   );
   const resolvedLocalItems = localRows.map((row) =>
     toLocalItemAsResolved(
       row,
       localModifiersByItemId.get(row.id) ?? [],
-      localAllergensByItemId.get(row.id) ?? []
+      mergeAllergens(row.allergens, localAllergensByItemId.get(row.id))
     )
   );
 
@@ -267,7 +276,11 @@ export async function clearVariantOverride(actor, shopId, variantId) {
 
 // --- Local (shop-exclusive) items ---
 
-export async function createLocalItem(actor, shopId, { categoryId, name, description, price, displayOrder }) {
+export async function createLocalItem(
+  actor,
+  shopId,
+  { categoryId, name, description, price, displayOrder, allergens }
+) {
   const { authority, shop } = await requireShopContext(actor, shopId);
   assertHasPermission(authority, PERMISSIONS.MANAGE_MENU, MANAGE_MENU_MESSAGE);
 
@@ -282,6 +295,7 @@ export async function createLocalItem(actor, shopId, { categoryId, name, descrip
     description,
     price,
     displayOrder,
+    allergens,
   });
   return toLocalItemResponse(item);
 }

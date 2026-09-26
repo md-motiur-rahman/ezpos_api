@@ -8,7 +8,7 @@ import {
 } from '../../utils/sql.js';
 
 const OVERRIDE_COLUMNS = `id, shop_id, menu_item_id, is_enabled, price_override, created_at, updated_at`;
-const LOCAL_ITEM_COLUMNS = `id, shop_id, category_id, name, description, price, display_order, created_at, updated_at`;
+const LOCAL_ITEM_COLUMNS = `id, shop_id, category_id, name, description, price, display_order, allergens, created_at, updated_at`;
 
 // --- Overrides ---
 
@@ -36,7 +36,7 @@ export async function deleteOverride(shopId, menuItemId) {
 export async function listResolvedMasterItemsForShop(shopId, companyId) {
   const { rows } = await query(
     `SELECT mi.id, mi.category_id, mi.name, mi.description, mi.display_order,
-            mi.price AS master_price,
+            mi.price AS master_price, mi.allergens AS own_allergens,
             COALESCE(smo.price_override, mi.price) AS effective_price,
             COALESCE(smo.is_enabled, true) AS is_enabled
      FROM menu_items mi
@@ -51,12 +51,15 @@ export async function listResolvedMasterItemsForShop(shopId, companyId) {
 
 // --- Local (shop-exclusive) items ---
 
-export async function createLocalItem(shopId, { categoryId, name, description, price, displayOrder }) {
+export async function createLocalItem(
+  shopId,
+  { categoryId, name, description, price, displayOrder, allergens }
+) {
   const { rows } = await query(
-    `INSERT INTO shop_menu_items (shop_id, category_id, name, description, price, display_order)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO shop_menu_items (shop_id, category_id, name, description, price, display_order, allergens)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING ${LOCAL_ITEM_COLUMNS}`,
-    [shopId, categoryId, name, description ?? null, price, displayOrder ?? 0]
+    [shopId, categoryId, name, description ?? null, price, displayOrder ?? 0, allergens ?? []]
   );
   return rows[0];
 }
@@ -87,6 +90,7 @@ export async function updateLocalItem(id, data) {
     description: 'description',
     price: 'price',
     displayOrder: 'display_order',
+    allergens: 'allergens',
   };
   const { clause, values } = buildUpdateSet(fieldMap, data);
   values.push(id);

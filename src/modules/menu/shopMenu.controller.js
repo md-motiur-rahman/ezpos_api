@@ -150,3 +150,91 @@ export const listLocalItemIngredients = asyncHandler(async (req, res) => {
   );
   res.status(200).json(ingredients);
 });
+// --- Sizes on shop-only items ---
+
+export const createLocalVariant = asyncHandler(async (req, res) => {
+  const variant = await shopMenuService.createLocalVariant(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId,
+    req.body
+  );
+  res.status(201).json(variant);
+});
+
+export const listLocalVariants = asyncHandler(async (req, res) => {
+  const variants = await shopMenuService.listLocalVariants(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId
+  );
+  res.status(200).json(variants);
+});
+
+export const updateLocalVariant = asyncHandler(async (req, res) => {
+  const variant = await shopMenuService.updateLocalVariant(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId,
+    req.params.variantId,
+    req.body
+  );
+  res.status(200).json(variant);
+});
+
+export const deleteLocalVariant = asyncHandler(async (req, res) => {
+  await shopMenuService.deleteLocalVariant(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId,
+    req.params.variantId
+  );
+  res.status(200).json({ message: 'Variant deleted.' });
+});
+
+// --- A shop item's size's own recipe ---
+
+export const attachIngredientToLocalVariant = asyncHandler(async (req, res) => {
+  await shopMenuService.attachIngredientToLocalVariant(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId,
+    req.params.variantId,
+    req.params.ingredientId,
+    req.body.quantity
+  );
+  res.status(201).json({ message: 'Ingredient attached.' });
+});
+
+export const listLocalVariantIngredients = asyncHandler(async (req, res) => {
+  const ingredients = await shopMenuService.listLocalVariantIngredients(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId,
+    req.params.variantId
+  );
+  res.status(200).json(ingredients);
+});
+
+export const updateLocalVariantIngredientQuantity = asyncHandler(async (req, res) => {
+  await shopMenuService.updateLocalVariantIngredientQuantity(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId,
+    req.params.variantId,
+    req.params.ingredientId,
+    req.body.quantity
+  );
+  res.status(200).json({ message: 'Ingredient quantity updated.' });
+});
+
+export const detachIngredientFromLocalVariant = asyncHandler(async (req, res) => {
+  await shopMenuService.detachIngredientFromLocalVariant(
+    req.actor,
+    req.params.shopId,
+    req.params.itemId,
+    req.params.variantId,
+    req.params.ingredientId
+  );
+  res.status(200).json({ message: 'Ingredient detached.' });
+});

@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { createItemSchema, updateItemSchema } from './menu.validation.js';
+import {
+  createItemSchema,
+  updateItemSchema,
+  createVariantSchema,
+  updateVariantSchema,
+} from './menu.validation.js';
 
 export const createLocalItemSchema = createItemSchema;
 export const updateLocalItemSchema = updateItemSchema;
@@ -7,6 +12,22 @@ export const updateLocalItemSchema = updateItemSchema;
 export const localItemIdParamSchema = z.object({
   shopId: z.string().uuid('Invalid shop id'),
   itemId: z.string().uuid('Invalid item id'),
+});
+
+export const createLocalVariantSchema = createVariantSchema;
+export const updateLocalVariantSchema = updateVariantSchema;
+
+export const localVariantParamSchema = z.object({
+  shopId: z.string().uuid('Invalid shop id'),
+  itemId: z.string().uuid('Invalid item id'),
+  variantId: z.string().uuid('Invalid variant id'),
+});
+
+export const localVariantIngredientParamSchema = z.object({
+  shopId: z.string().uuid('Invalid shop id'),
+  itemId: z.string().uuid('Invalid item id'),
+  variantId: z.string().uuid('Invalid variant id'),
+  ingredientId: z.string().uuid('Invalid ingredient id'),
 });
 
 export const overrideSchema = z.object({

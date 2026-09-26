@@ -33,7 +33,7 @@ function toResolvedItem(row, variants, modifierGroups, allergens) {
   };
 }
 
-function toLocalItemAsResolved(row, modifierGroups, allergens) {
+function toLocalItemAsResolved(row, variants, modifierGroups, allergens) {
   return {
     id: row.id,
     source: 'local',
@@ -44,7 +44,7 @@ function toLocalItemAsResolved(row, modifierGroups, allergens) {
     masterPrice: null,
     isEnabled: true, // local items have no override concept - they're this shop's own, always on
     displayOrder: row.display_order,
-    variants: [], // variants are a master-item-only concept for now
+    variants,
     modifierGroups,
     allergens,
   };
@@ -84,6 +84,30 @@ function toResolvedVariant(row) {
     price: Number(row.effective_price),
     masterPrice: Number(row.master_price),
     isEnabled: row.is_enabled,
+    displayOrder: row.display_order,
+  };
+}
+
+function toLocalVariantResponse(row) {
+  return {
+    id: row.id,
+    shopMenuItemId: row.shop_menu_item_id,
+    name: row.name,
+    price: Number(row.price),
+    displayOrder: row.display_order,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** A shop item's size in the resolved-menu shape (no master to override, so both prices are its own). */
+function toLocalVariantAsResolved(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    price: Number(row.price),
+    masterPrice: Number(row.price),
+    isEnabled: true,
     displayOrder: row.display_order,
   };
 }
@@ -180,6 +204,13 @@ export async function getResolvedMenu(actor, shopId) {
     shop.company_id
   );
   const localAllergenRows = await shopMenuRepository.listAggregatedAllergensForLocalItems(shopId);
+  const localVariantRows = await shopMenuRepository.listLocalVariantsForShop(shopId);
+  const localVariantsByItemId = new Map();
+  for (const row of localVariantRows) {
+    const list = localVariantsByItemId.get(row.shop_menu_item_id) ?? [];
+    list.push(toLocalVariantAsResolved(row));
+    localVariantsByItemId.set(row.shop_menu_item_id, list);
+  }
 
   // Group flat variant rows onto their parent item - response-shaping, done
   // here rather than in the repository, which just fetches data.
@@ -214,6 +245,7 @@ export async function getResolvedMenu(actor, shopId) {
   const resolvedLocalItems = localRows.map((row) =>
     toLocalItemAsResolved(
       row,
+      localVariantsByItemId.get(row.id) ?? [],
       localModifiersByItemId.get(row.id) ?? [],
       mergeAllergens(row.allergens, localAllergensByItemId.get(row.id))
     )
@@ -427,6 +459,128 @@ function toLocalRecipeIngredientResponse(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+// --- Sizes on shop-only items ---
+
+export async function createLocalVariant(actor, shopId, itemId, data) {
+  const { authority } = await requireShopContext(actor, shopId);
+  assertHasPermission(authority, PERMISSIONS.MANAGE_MENU, MANAGE_MENU_MESSAGE);
+  await getLocalItemOrThrow(shopId, itemId);
+  const variant = await shopMenuRepository.createLocalVariant(itemId, data);
+  return toLocalVariantResponse(variant);
+}
+
+export async function listLocalVariants(actor, shopId, itemId) {
+  await requireShopContext(actor, shopId); // reads stay open to anyone in scope, like the menu itself
+  await getLocalItemOrThrow(shopId, itemId);
+  const variants = await shopMenuRepository.listActiveVariantsForLocalItem(itemId);
+  return variants.map(toLocalVariantResponse);
+}
+
+async function getLocalVariantOrThrow(itemId, variantId) {
+  const variant = await shopMenuRepository.findActiveVariantByIdForLocalItem(variantId, itemId);
+  if (!variant) {
+    throw new AppError('Variant not found', 404);
+  }
+  return variant;
+}
+
+export async function updateLocalVariant(actor, shopId, itemId, variantId, data) {
+  const { authority } = await requireShopContext(actor, shopId);
+  assertHasPermission(authority, PERMISSIONS.MANAGE_MENU, MANAGE_MENU_MESSAGE);
+  await getLocalItemOrThrow(shopId, itemId);
+  await getLocalVariantOrThrow(itemId, variantId);
+  const updated = await shopMenuRepository.updateLocalVariant(variantId, data);
+  return toLocalVariantResponse(updated);
+}
+
+export async function deleteLocalVariant(actor, shopId, itemId, variantId) {
+  const { authority } = await requireShopContext(actor, shopId);
+  assertHasPermission(authority, PERMISSIONS.MANAGE_MENU, MANAGE_MENU_MESSAGE);
+  await getLocalItemOrThrow(shopId, itemId);
+  const variant = await getLocalVariantOrThrow(itemId, variantId);
+  await shopMenuRepository.softDeleteLocalVariant(variant.id);
+}
+
+// --- A shop item's size's own recipe ---
+//
+// Same as a master size's recipe: what this size uses ON TOP of the item's
+// own recipe. The sale deduction adds the two together.
+
+async function requireLocalVariantAndIngredient(actor, shopId, itemId, variantId, ingredientId) {
+  const { authority, shop } = await requireShopContext(actor, shopId);
+  assertHasPermission(authority, PERMISSIONS.MANAGE_MENU, MANAGE_MENU_MESSAGE);
+
+  await getLocalItemOrThrow(shopId, itemId);
+  await getLocalVariantOrThrow(itemId, variantId);
+  const ingredient = await menuRepository.findActiveIngredientByIdForCompany(
+    ingredientId,
+    shop.company_id
+  );
+  if (!ingredient) {
+    throw new AppError('Ingredient not found', 404);
+  }
+}
+
+export async function attachIngredientToLocalVariant(
+  actor,
+  shopId,
+  itemId,
+  variantId,
+  ingredientId,
+  quantity
+) {
+  await requireLocalVariantAndIngredient(actor, shopId, itemId, variantId, ingredientId);
+  try {
+    await menuRepository.attachIngredientToVariant(variantId, ingredientId, quantity);
+  } catch (err) {
+    if (err.code === POSTGRES_UNIQUE_VIOLATION) {
+      throw new AppError('This ingredient is already attached to this variant', 409);
+    }
+    throw err;
+  }
+}
+
+export async function listLocalVariantIngredients(actor, shopId, itemId, variantId) {
+  await requireShopContext(actor, shopId); // scope check only - reads stay open
+  await getLocalItemOrThrow(shopId, itemId);
+  await getLocalVariantOrThrow(itemId, variantId);
+  const ingredients = await menuRepository.listAttachedIngredientsForVariant(variantId);
+  return ingredients.map(toLocalRecipeIngredientResponse);
+}
+
+export async function updateLocalVariantIngredientQuantity(
+  actor,
+  shopId,
+  itemId,
+  variantId,
+  ingredientId,
+  quantity
+) {
+  await requireLocalVariantAndIngredient(actor, shopId, itemId, variantId, ingredientId);
+  const updated = await menuRepository.updateVariantIngredientQuantity(
+    variantId,
+    ingredientId,
+    quantity
+  );
+  if (!updated) {
+    throw new AppError('This ingredient is not attached to this variant', 404);
+  }
+}
+
+export async function detachIngredientFromLocalVariant(
+  actor,
+  shopId,
+  itemId,
+  variantId,
+  ingredientId
+) {
+  await requireLocalVariantAndIngredient(actor, shopId, itemId, variantId, ingredientId);
+  const detached = await menuRepository.detachIngredientFromVariant(variantId, ingredientId);
+  if (!detached) {
+    throw new AppError('This ingredient is not attached to this variant', 404);
+  }
 }
 
 export async function attachIngredientToLocalItem(actor, shopId, itemId, ingredientId, quantity) {

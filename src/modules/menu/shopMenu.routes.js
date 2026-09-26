@@ -15,6 +15,10 @@ import {
   modifierOptionIdParamSchema,
   localItemModifierGroupParamSchema,
   localItemIngredientParamSchema,
+  createLocalVariantSchema,
+  updateLocalVariantSchema,
+  localVariantParamSchema,
+  localVariantIngredientParamSchema,
 } from './shopMenu.validation.js';
 import { recipeQuantitySchema } from './menu.validation.js';
 import { shopIdOnlyParamSchema } from '../staff/staff.validation.js';
@@ -155,6 +159,62 @@ router.delete(
   requireActiveBillingForShop,
   validateParams(localItemIngredientParamSchema),
   shopMenuController.detachIngredientFromLocalItem
+);
+
+// --- Sizes on shop-only items ---
+
+router.post(
+  '/items/:itemId/variants',
+  requireActiveBillingForShop,
+  validateParams(localItemIdParamSchema),
+  validateBody(createLocalVariantSchema),
+  shopMenuController.createLocalVariant
+);
+router.get(
+  '/items/:itemId/variants',
+  validateParams(localItemIdParamSchema),
+  shopMenuController.listLocalVariants
+);
+router.patch(
+  '/items/:itemId/variants/:variantId',
+  requireActiveBillingForShop,
+  validateParams(localVariantParamSchema),
+  validateBody(updateLocalVariantSchema),
+  shopMenuController.updateLocalVariant
+);
+router.delete(
+  '/items/:itemId/variants/:variantId',
+  requireActiveBillingForShop,
+  validateParams(localVariantParamSchema),
+  shopMenuController.deleteLocalVariant
+);
+
+// --- A shop item's size's own recipe ---
+
+router.post(
+  '/items/:itemId/variants/:variantId/ingredients/:ingredientId',
+  requireActiveBillingForShop,
+  validateParams(localVariantIngredientParamSchema),
+  validateBody(recipeQuantitySchema),
+  shopMenuController.attachIngredientToLocalVariant
+);
+router.get(
+  '/items/:itemId/variants/:variantId/ingredients',
+  validateParams(localVariantParamSchema),
+  shopMenuController.listLocalVariantIngredients
+);
+router.patch(
+  '/items/:itemId/variants/:variantId/ingredients/:ingredientId',
+  requireActiveBillingForShop,
+  validateParams(localVariantIngredientParamSchema),
+  validateBody(recipeQuantitySchema),
+  shopMenuController.updateLocalVariantIngredientQuantity
+);
+router.delete(
+  '/items/:itemId/variants/:variantId/ingredients/:ingredientId',
+  requireActiveBillingForShop,
+  validateParams(localVariantIngredientParamSchema),
+  shopMenuController.detachIngredientFromLocalVariant
 );
 
 export default router;

@@ -147,6 +147,72 @@ export async function listResolvedVariantsForShop(shopId, companyId) {
   return rows;
 }
 
+// --- Sizes on shop-only items ---
+//
+// Stored in menu_item_variants next to master sizes (see the migration), with
+// shop_menu_item_id set instead of menu_item_id.
+
+const LOCAL_VARIANT_COLUMNS = `id, shop_menu_item_id, name, price, display_order, created_at, updated_at`;
+
+export async function createLocalVariant(shopMenuItemId, { name, price, displayOrder }) {
+  const { rows } = await query(
+    `INSERT INTO menu_item_variants (shop_menu_item_id, name, price, display_order)
+     VALUES ($1, $2, $3, $4)
+     RETURNING ${LOCAL_VARIANT_COLUMNS}`,
+    [shopMenuItemId, name, price, displayOrder ?? 0]
+  );
+  return rows[0];
+}
+
+export async function listActiveVariantsForLocalItem(shopMenuItemId) {
+  const { rows } = await query(
+    `SELECT ${LOCAL_VARIANT_COLUMNS} FROM menu_item_variants
+     WHERE shop_menu_item_id = $1 AND deleted_at IS NULL
+     ORDER BY display_order, name`,
+    [shopMenuItemId]
+  );
+  return rows;
+}
+
+export async function findActiveVariantByIdForLocalItem(id, shopMenuItemId) {
+  const { rows } = await query(
+    `SELECT ${LOCAL_VARIANT_COLUMNS} FROM menu_item_variants
+     WHERE id = $1 AND shop_menu_item_id = $2 AND deleted_at IS NULL`,
+    [id, shopMenuItemId]
+  );
+  return rows[0] ?? null;
+}
+
+/** Every size of every active shop-only item of one shop, for the resolved menu. */
+export async function listLocalVariantsForShop(shopId) {
+  const { rows } = await query(
+    `SELECT miv.id, miv.shop_menu_item_id, miv.name, miv.price, miv.display_order
+     FROM menu_item_variants miv
+     JOIN shop_menu_items smi ON smi.id = miv.shop_menu_item_id AND smi.deleted_at IS NULL
+     WHERE smi.shop_id = $1 AND miv.deleted_at IS NULL
+     ORDER BY miv.shop_menu_item_id, miv.display_order, miv.name`,
+    [shopId]
+  );
+  return rows;
+}
+
+export async function updateLocalVariant(id, data) {
+  const fieldMap = { name: 'name', price: 'price', displayOrder: 'display_order' };
+  const { clause, values } = buildUpdateSet(fieldMap, data);
+  values.push(id);
+  const { rows } = await query(
+    `UPDATE menu_item_variants SET ${clause} WHERE id = $${values.length} RETURNING ${LOCAL_VARIANT_COLUMNS}`,
+    values
+  );
+  return rows[0];
+}
+
+export async function softDeleteLocalVariant(id) {
+  await query(`UPDATE menu_item_variants SET deleted_at = now(), updated_at = now() WHERE id = $1`, [
+    id,
+  ]);
+}
+
 // --- Modifier option overrides (6.4) ---
 
 export async function upsertModifierOptionOverride(shopId, optionId, { isEnabled, priceDeltaOverride }) {

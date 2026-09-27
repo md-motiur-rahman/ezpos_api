@@ -169,7 +169,7 @@ async function fetchPurchaseOrderDetail(shopId, poId) {
  */
 export async function createPurchaseOrder(actor, shopId, { supplierId, orderedAt, notes, items }) {
   await requireManageInventory(actor, shopId);
-  await getSupplierForShopOrThrow(shopId, supplierId);
+  if (supplierId) await getSupplierForShopOrThrow(shopId, supplierId);
 
   const itemIds = items.map((i) => i.inventoryItemId);
   const existingCount = await purchaseOrderRepository.countExistingItemsForShop(shopId, itemIds);

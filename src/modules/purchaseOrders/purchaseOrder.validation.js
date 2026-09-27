@@ -7,7 +7,9 @@ const purchaseOrderItemSchema = z.object({
 });
 
 export const createPurchaseOrderSchema = z.object({
-  supplierId: z.string().uuid('Invalid supplier id'),
+  // Optional - a shop can buy from a market or supermarket with no supplier
+  // on file.
+  supplierId: z.string().uuid('Invalid supplier id').optional(),
   // Optional - defaults to now() at the DB layer if omitted. Accepting an
   // explicit value is what makes this a genuine LOG, not just "orders
   // placed through this system" - a past order can be backdated.

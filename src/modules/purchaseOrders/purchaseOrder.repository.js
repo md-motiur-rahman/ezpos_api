@@ -7,7 +7,7 @@ export async function createPurchaseOrder(shopId, { supplierId, orderedAt, notes
     `INSERT INTO purchase_orders (shop_id, supplier_id, ordered_at, notes)
      VALUES ($1, $2, COALESCE($3, now()), $4)
      RETURNING ${PO_COLUMNS}`,
-    [shopId, supplierId, orderedAt ?? null, notes ?? null]
+    [shopId, supplierId ?? null, orderedAt ?? null, notes ?? null]
   );
   return rows[0];
 }
@@ -56,7 +56,7 @@ export async function listActivePurchaseOrdersForShop(shopId) {
             COALESCE(SUM(poi.quantity * poi.unit_cost), 0) AS total_cost,
             count(poi.id)::int AS item_count
      FROM purchase_orders po
-     JOIN suppliers s ON s.id = po.supplier_id
+     LEFT JOIN suppliers s ON s.id = po.supplier_id
      LEFT JOIN purchase_order_items poi ON poi.purchase_order_id = po.id
      WHERE po.shop_id = $1 AND po.deleted_at IS NULL
      GROUP BY po.id, s.name
@@ -71,7 +71,7 @@ export async function findActivePurchaseOrderByIdForShop(id, shopId) {
     `SELECT po.id, po.shop_id, po.supplier_id, s.name AS supplier_name,
             po.ordered_at, po.notes, po.created_at, po.updated_at
      FROM purchase_orders po
-     JOIN suppliers s ON s.id = po.supplier_id
+     LEFT JOIN suppliers s ON s.id = po.supplier_id
      WHERE po.id = $1 AND po.shop_id = $2 AND po.deleted_at IS NULL`,
     [id, shopId]
   );

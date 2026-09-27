@@ -26,6 +26,7 @@ import receiptAliasRoutes from './modules/inventory/receiptAlias.routes.js';
 import receiptInfoRoutes from './modules/reports/receiptInfo.routes.js';
 import shopDashboardRoutes from './modules/reports/shopDashboard.routes.js';
 import inventoryOverviewRoutes from './modules/inventory/inventoryOverview.routes.js';
+import receiptScanRoutes from './modules/inventory/receiptScan.routes.js';
 import supplierRoutes from './modules/suppliers/supplier.routes.js';
 import purchaseOrderRoutes from './modules/purchaseOrders/purchaseOrder.routes.js';
 import wastageLogRoutes from './modules/wastage/wastageLog.routes.js';
@@ -174,7 +175,7 @@ app.use(pinoHttp({ logger })); // structured request logging (method, path, stat
 // raw request body, which express.json() would otherwise have already parsed.
 app.use('/api/webhooks', webhookRoutes);
 
-app.use(express.json());
+app.use(express.json({ limit: '10mb' })); // Module 10.5's scanned receipt photos are the one body this app sends larger than the old 100kb default.
 app.use(express.urlencoded({ extended: true }));
 
 // --- Health check ---
@@ -230,6 +231,7 @@ app.use('/api/shops/:shopId/attendance', attendanceRoutes);
 app.use('/api/shops/:shopId/menu', shopMenuRoutes);
 app.use('/api/shops/:shopId/inventory-items', inventoryRoutes);
 app.use('/api/shops/:shopId/receipt-aliases', receiptAliasRoutes);
+app.use('/api/shops/:shopId/receipt-scan', receiptScanRoutes);
 app.use('/api/shops/:shopId/dashboard-summary', shopDashboardRoutes);
 app.use('/api/shops/:shopId/receipt-info', receiptInfoRoutes);
 app.use('/api/shops/:shopId/suppliers', supplierRoutes);
